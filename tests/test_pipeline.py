@@ -265,8 +265,9 @@ def test_round_trip_report_shows_return_dates_and_ignores_one_way_rows(tmp_path)
     report.build(wl, data, reports)
     md = (reports / "latest.md").read_text()
     assert "回程 = 出发后 45 天" in md and "回 2026-12-07" in md
-    obs, _ = report.load_latest_run(data, wl)
+    obs, _, missing = report.load_latest_run(data, wl)
     assert len(obs) == 8 and (obs["ret"] != "").all()
+    assert missing["rt"] > 0  # only 8 of the round trips were searched (limit=8)
 
 
 def test_two_one_ways_pairs_outbound_and_return_legs(tmp_path):
@@ -354,3 +355,106 @@ def test_resume_skips_searches_already_done_today(tmp_path):
     assert len(calls) - first <= 4 + 4  # 4 new searches (+ at most their positioning)
     obs = pd.read_csv(tmp_path / "observations.csv")
     assert len(obs) == 12 and not obs.duplicated(subset=["series_key", "depart"]).any()
+
+
+def _windows(wl, out=(date(2027, 5, 1), date(2027, 5, 9), 4), back=(date(2027, 8, 1), date(2027, 8, 7), 6)):
+    wl.request_delay = 0
+    wl.trips = ("round-trip", "two-one-ways")
+    wl.outbound, wl.inbound = config.DateRange(*out), config.DateRange(*back)
+    return wl
+
+
+def test_config_rejects_settings_that_would_be_silently_ignored(tmp_path):
+    base = FIXTURE.read_text()
+    for extra, message in (
+        ('[dates]\nreturn = { from = "2027-08-01", to = "2027-08-25" }\n', "only works together"),
+        ('[alerts]\nshanghai = 3800\n', "unknown [alerts] keys"),
+    ):
+        text = base.replace("[dates]\n", "[dates_unused]\n") if extra.startswith("[dates]") else base.replace("[alerts]\n", "[alerts_unused]\n")
+        path = tmp_path / "w.toml"
+        path.write_text(text + "\n" + extra)
+        try:
+            config.load(path)
+        except ValueError as exc:
+            assert message in str(exc)
+        else:
+            raise AssertionError(f"expected an error for {extra!r}")
+    try:
+        config._range({"from": "2027-05-01", "to": "2027-05-09", "step_days": 0})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("step_days = 0 must be rejected")
+
+
+def test_round_trip_pairs_rotate_daily_and_only_filters_by_leg():
+    wl = _windows(config.load(FIXTURE))
+    first = [(j.depart, j.ret) for j in wl.jobs(date(2026, 10, 11)) if j.ret]
+    second = [(j.depart, j.ret) for j in wl.jobs(date(2026, 10, 12)) if j.ret]
+    assert sorted(first) == sorted(second) and first[0] != second[0]
+    assert all(j.leg == "rt" for j in wl.jobs(date(2026, 10, 11)) if j.ret)
+
+
+def test_nothing_left_to_search_is_not_an_error(tmp_path):
+    from flightcheck import report
+
+    wl = _windows(config.load(FIXTURE))
+    obs = collect.collect(wl, tmp_path / "d", today=date(2027, 9, 1), fetch=_fake_fetch, log=lambda *_: None)
+    assert obs.empty
+    collect.collect(wl, tmp_path / "d", today=date(2026, 10, 11), limit=4, fetch=_fake_fetch, log=lambda *_: None)
+    pd.read_csv(tmp_path / "d" / "observations.csv").assign(run_date="2027-09-01").to_csv(tmp_path / "d" / "observations.csv", index=False)
+    info = report.build(wl, tmp_path / "d", tmp_path / "r")
+    assert info["run_date"] is None and "passed" in (tmp_path / "r" / "latest.md").read_text()
+
+
+def test_overlapping_windows_never_pair_a_return_before_the_outbound(tmp_path):
+    from flightcheck import report
+
+    wl = _windows(config.load(FIXTURE), out=(date(2027, 5, 1), date(2027, 5, 20), 1), back=(date(2027, 5, 2), date(2027, 5, 20), 1))
+
+    def fetch(search):
+        s = search.slices[0]
+        if "IAH" in s.destinations or "IAH" in s.origins and "ATL" in s.destinations:
+            return _fake_fetch(search)
+        back = s.origins[0] != "ATL" and s.origins[0] != "IAH"
+        # The cheapest return is on May 2, before most outbound dates.
+        price = 1000 if back and s.date == date(2027, 5, 2) else 3000 + s.date.day * 10
+        it = google.Itinerary(price, ["X"], f"{s.origins[0]}-{s.destinations[0]}", ["X1"], 0, 600, None, None)
+        return google.Result([it], None)
+
+    data = tmp_path / "data"
+    collect.collect(wl, data, today=date(2026, 10, 11), only={"out", "back"}, fetch=fetch, log=lambda *_: None)
+    obs, _, _ = report.load_latest_run(data, wl)
+    priced = obs.dropna(subset=["total_price"])
+    o, b, total = report._two_one_ways(wl, priced[priced["kind"] == "out"], priced[priced["kind"] == "back"], "shanghai")
+    assert b["depart"] > o["depart"]
+
+
+def test_two_one_ways_under_the_round_trip_price_alert(tmp_path):
+    from flightcheck import report
+
+    wl = _windows(config.load(FIXTURE))
+    wl.alerts = {"round_trip": 99999}
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    collect.collect(wl, data, today=date(2026, 10, 11), only={"out", "back"}, fetch=_fake_fetch, log=lambda *_: None)
+    assert report.build(wl, data, reports)["alerts"]
+    assert "两张单程合计" in (reports / "alerts.md").read_text()
+    assert not report.build(wl, data, reports)["alerts"]  # same pair again: no repeat
+
+
+def test_return_positioning_flies_on_the_landing_day(tmp_path):
+    wl = _windows(config.load(FIXTURE))
+    seen = []
+
+    def fetch(search):
+        s = search.slices[0]
+        if s.origins == ("IAH",) and s.destinations == ("ATL",):
+            seen.append(s.date)
+            return google.Result([google.Itinerary(99, ["UA"], "IAH-ATL", ["UA1"], 0, 120, None, None)], None)
+        landed = s.date + timedelta(days=1)
+        it = google.Itinerary(5000, ["NH"], f"{s.origins[0]}-HND-{s.destinations[0]}", ["NH1"], 1, 900,
+                              f"{s.date} 10:00", f"{landed} 08:30")
+        return google.Result([it], None)
+
+    collect.collect(wl, tmp_path, today=date(2026, 10, 11), only={"back"}, fetch=fetch, log=lambda *_: None)
+    assert seen and all(d.day in (2, 8) for d in seen)  # Aug 1 / Aug 7 departures land Aug 2 / Aug 8

@@ -18,6 +18,9 @@ DATE_ANCHOR = date(2024, 1, 1)
 #               departure + return_after_days (cheaper for stays over a month,
 #               where discounted round-trip business fares are not sold)
 TRIP_MODES = ("one-way", "round-trip", "two-one-ways")
+# round_trip: a round-trip ticket, or two one-ways together, at or below this
+# one_way: a single one-way leg at or below this
+ALERT_KINDS = {"round_trip", "one_way"}
 
 
 @dataclass(frozen=True)
@@ -66,7 +69,7 @@ class Job:
     ret: date | None  # round-trip tickets only
     search: Search
     positioning: Search | None
-    leg: str = "out"  # "out" (to the destination) or "back" (a separate return one-way)
+    leg: str = "out"  # "out" (one-way there), "back" (one-way home) or "rt" (round-trip ticket)
     trip_depart: date | None = None  # outbound date of the trip this leg belongs to
 
     @property
@@ -151,11 +154,14 @@ class Watchlist:
                     add(self._return_job(strategy, city, airports, day, None))
         if "round-trip" in self.trips:
             k = self.round_trip_every
-            for depart in out_dates[::k]:
-                for ret in in_dates[::k]:
-                    if ret > depart:
-                        for strategy, city, airports in places:
-                            add(self._job(strategy, city, airports, depart, ret))
+            pairs = [(d, r) for d in out_dates[::k] for r in in_dates[::k] if r > d]
+            if pairs:
+                # Start at a different pair each day, so if a time budget cuts the
+                # run short it is not always the same pairs that go unsearched.
+                start = today.toordinal() % len(pairs)
+                for depart, ret in pairs[start:] + pairs[:start]:
+                    for strategy, city, airports in places:
+                        add(self._job(strategy, city, airports, depart, ret))
         return list(jobs.values())
 
     def _job(self, strategy: Strategy, city: str, airports, depart: date, ret: date | None) -> Job:
@@ -172,7 +178,7 @@ class Watchlist:
             if ret is not None:
                 pos.append(Slice(ret, strategy.origin, strategy.position_from))
             positioning = Search(tuple(pos), cabin="economy", **common)
-        return Job(strategy, city, depart, ret, search, positioning, trip_depart=depart)
+        return Job(strategy, city, depart, ret, search, positioning, leg="rt" if ret else "out", trip_depart=depart)
 
     def _return_job(self, strategy: Strategy, city: str, airports, day: date, trip_depart: date | None) -> Job:
         common = dict(trip="one-way", adults=self.adults, currency=self.currency)
@@ -231,6 +237,12 @@ def load(path: str | Path) -> Watchlist:
     outbound, inbound = _range(dates.get("outbound")), _range(dates.get("return"))
     if outbound and set(trips) & {"round-trip", "two-one-ways"} and not inbound:
         raise ValueError("[dates] outbound is set, so round trips also need [dates] return")
+    if inbound and not outbound:
+        raise ValueError("[dates] return only works together with [dates] outbound")
+    alerts = {k: float(v) for k, v in raw.get("alerts", {}).items()}
+    unknown = set(alerts) - ALERT_KINDS
+    if unknown:
+        raise ValueError(f"unknown [alerts] keys {sorted(unknown)}; use {sorted(ALERT_KINDS)}")
     step = int(dates.get("step_days", 7))
     if step < 1:
         raise ValueError("step_days must be >= 1")
@@ -248,7 +260,7 @@ def load(path: str | Path) -> Watchlist:
         destinations=destinations,
         strategies=strategies,
         model=ModelSettings(**{k: v for k, v in raw.get("model", {}).items() if k in ModelSettings.__dataclass_fields__}),
-        alerts={k: float(v) for k, v in raw.get("alerts", {}).items()},
+        alerts=alerts,
         outbound=outbound,
         inbound=inbound,
         round_trip_every=max(1, int(dates.get("round_trip_every", 1))),
@@ -261,4 +273,7 @@ def _range(raw) -> DateRange | None:
     start, end = date.fromisoformat(str(raw["from"])), date.fromisoformat(str(raw["to"]))
     if end < start:
         raise ValueError(f"date range ends before it starts: {raw}")
-    return DateRange(start, end, int(raw.get("step_days", 1)))
+    step = int(raw.get("step_days", 1))
+    if step < 1:
+        raise ValueError(f"step_days must be >= 1 in {raw}")
+    return DateRange(start, end, step)

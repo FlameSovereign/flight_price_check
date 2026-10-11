@@ -61,8 +61,17 @@ def _kind(row) -> str:
     return "back" if row["leg"] == "back" else "out"
 
 
-def load_latest_run(data_dir: Path, watchlist: Watchlist) -> tuple[pd.DataFrame, date]:
-    """The latest run's observations for exactly the searches the watchlist asks for.
+class NothingToReport(RuntimeError):
+    pass
+
+
+def _job_key(j) -> tuple[str, str, str, str]:
+    return (j.series_key, j.depart.isoformat(), j.ret.isoformat() if j.ret else "", (j.trip_depart or j.depart).isoformat())
+
+
+def load_latest_run(data_dir: Path, watchlist: Watchlist) -> tuple[pd.DataFrame, date, dict[str, int]]:
+    """The latest run's observations for exactly the searches the watchlist asks for,
+    the run date, and how many wanted searches of each kind have no row that day.
 
     Rows from an older setup (other dates, trip type, cities or strategies) stay in
     the data for the model but not in the report.
@@ -73,18 +82,32 @@ def load_latest_run(data_dir: Path, watchlist: Watchlist) -> tuple[pd.DataFrame,
     obs["leg"] = obs["leg"].replace("", "out") if "leg" in obs else "out"
     obs["trip_depart"] = obs["trip_depart"].where(obs["trip_depart"] != "", obs["depart"]) if "trip_depart" in obs else obs["depart"]
     run_date = max(obs["run_date"])
-    wanted = {(j.series_key, j.depart.isoformat(), j.ret.isoformat() if j.ret else "")
-              for j in watchlist.jobs(date.fromisoformat(run_date))}
+    jobs = watchlist.jobs(date.fromisoformat(run_date))
+    if not jobs:
+        raise NothingToReport("every date in the watchlist has passed; update [dates] in config/watchlist.toml")
+    wanted = {_job_key(j): ("rt" if j.ret else j.leg) for j in jobs}
     latest = obs[obs["run_date"] == run_date]
-    latest = latest[[k in wanted for k in zip(latest["series_key"], latest["depart"], latest["ret"])]].copy()
+    keys = list(zip(latest["series_key"], latest["depart"], latest["ret"], latest["trip_depart"]))
+    latest = latest[[k in wanted for k in keys]].copy()
     if latest.empty:
         raise RuntimeError("the latest run does not match the current watchlist; run `flightcheck collect` first")
     latest["kind"] = [_kind(r) for _, r in latest.iterrows()]
-    return latest, date.fromisoformat(run_date)
+    present = set(zip(latest["series_key"], latest["depart"], latest["ret"], latest["trip_depart"]))
+    missing = {k: 0 for k in ("rt", "out", "back")}
+    for key, kind in wanted.items():
+        if key not in present:
+            missing[kind] += 1
+    return latest, date.fromisoformat(run_date), missing
 
 
 def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
-    obs, run_date = load_latest_run(data_dir, watchlist)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        obs, run_date, missing = load_latest_run(data_dir, watchlist)
+    except NothingToReport as exc:
+        (reports_dir / "latest.md").write_text(f"# 回国{_cabin(watchlist.cabin)}价格监控\n\n> {exc}\n", encoding="utf-8")
+        (reports_dir / "alerts.md").unlink(missing_ok=True)
+        return {"run_date": None, "alerts": False, "metrics": {"status": str(exc)}}
     result = model.train(model.load_history(data_dir), watchlist.model)
     signals = model.latest_signals(result, watchlist.model)
     obs = obs.merge(
@@ -94,7 +117,6 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     )
     names = {s.key: s.name for s in watchlist.strategies}
 
-    reports_dir.mkdir(parents=True, exist_ok=True)
     alerts = _alerts(obs, watchlist, names, Path(data_dir) / ALERT_STATE, run_date)
     alert_path = reports_dir / "alerts.md"
     if alerts:
@@ -102,7 +124,7 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     elif alert_path.exists():
         alert_path.unlink()
 
-    md = _render(watchlist, run_date, obs, names, result.metrics, alerts)
+    md = _render(watchlist, run_date, obs, names, result.metrics, alerts, missing)
     (reports_dir / "latest.md").write_text(md, encoding="utf-8")
     (reports_dir / "model.json").write_text(json.dumps(result.metrics, ensure_ascii=False, indent=2) + "\n")
     return {"run_date": str(run_date), "alerts": bool(alerts), "metrics": result.metrics}
@@ -186,10 +208,15 @@ def _two_one_ways(watchlist: Watchlist, out: pd.DataFrame, back: pd.DataFrame, c
     Fixed windows: any outbound date with any return date. Rolling grid: each
     outbound with the return leg searched for it."""
     if watchlist.outbound is not None:
-        o, b = _best_legs(out, city, None), _best_legs(back, city, None)
+        o, b = _best_legs(out, city, "depart"), _best_legs(back, city, "depart")
         if o is None or b is None:
             return None
-        return o, b, o["total_price"] + b["total_price"]
+        pairs = [(o.loc[d], b.loc[r], o.loc[d, "total_price"] + b.loc[r, "total_price"])
+                 for d in o.index for r in b.index if r > d]
+        if not pairs:
+            return None
+        best = min(pairs, key=lambda p: p[2])
+        return best[0].rename(None).to_dict() | {"depart": best[0].name}, best[1].rename(None).to_dict() | {"depart": best[1].name}, best[2]
     o, b = _best_legs(out, city, "trip_depart"), _best_legs(back, city, "trip_depart")
     if o is None or b is None:
         return None
@@ -206,7 +233,8 @@ def _leg_line(r, names) -> str:
             f"{r['route']}（{r['airlines']}）· 建议：{_signal(r)}")
 
 
-def _render(watchlist, run_date, obs, names, metrics, alerts) -> str:
+def _render(watchlist, run_date, obs, names, metrics, alerts, missing=None) -> str:
+    missing = missing or {}
     order = [s.key for s in watchlist.strategies]
     priced = obs.dropna(subset=["total_price"]).sort_values("total_price")
     rt, out, back = (priced[priced["kind"] == k] for k in ("rt", "out", "back"))
@@ -221,6 +249,10 @@ def _render(watchlist, run_date, obs, names, metrics, alerts) -> str:
     ]
     if alerts:
         lines += ["## 🔔 价格提醒", "", alerts.split("\n", 2)[2].strip(), ""]
+    skipped = sum(missing.values())
+    if skipped:
+        parts = "，".join(f"{KIND_NAMES[k]} {n} 个" for k, n in missing.items() if n)
+        lines += [f"> ⚠️ 今天有 {skipped} 个搜索没有结果记录（{parts}），多半是时间预算用完或搜索失败；往返票的配对每天轮换起点，明天会先跑别的。", ""]
 
     lines += ["## 今日速览", ""]
     for city in watchlist.destinations:
@@ -228,19 +260,23 @@ def _render(watchlist, run_date, obs, names, metrics, alerts) -> str:
         best_rt = _best_legs(rt, city, None)
         pair = _two_one_ways(watchlist, out, back, city) if "two-one-ways" in watchlist.trips else None
         if "round-trip" in watchlist.trips:
-            if best_rt is None:
+            searched = not obs[(obs["city"] == city) & (obs["kind"] == "rt")].empty
+            if best_rt is not None:
+                lines.append(f"  - 往返票最低 **{_leg_line(best_rt, names)}**")
+            elif searched:
                 lines.append("  - 往返票：Google 上还没有这些日期组合的往返票价（便宜的往返票往往要等航司放出夏季运价）")
             else:
-                lines.append(f"  - 往返票最低 **{_leg_line(best_rt, names)}**")
+                lines.append("  - 往返票：今天没有搜到这一项（没跑到或搜索失败）")
         if pair is not None:
             o, b, total = pair
             lines += [f"  - 两张单程最低合计 **{_money(total)}**",
                       f"    - 去程 {_leg_line(o, names)}",
                       f"    - 回程 {_leg_line(b, names)}"]
         elif "one-way" in watchlist.trips or "two-one-ways" in watchlist.trips:
-            o = _best_legs(out, city, None)
-            if o is not None:
-                lines.append(f"  - 去程单程最低 {_leg_line(o, names)}")
+            for kind, legs in (("out", out), ("back", back)):
+                leg = _best_legs(legs, city, None)
+                if leg is not None:
+                    lines.append(f"  - {KIND_NAMES[kind]}最低 {_leg_line(leg, names)}")
         if best_rt is not None and pair is not None:
             cheaper = "往返票" if best_rt["total_price"] <= pair[2] else "两张单程"
             lines.append(f"  - 现在更便宜的买法：**{cheaper}**（差 {_money(abs(best_rt['total_price'] - pair[2]))}）")
@@ -429,17 +465,42 @@ def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Pa
                 state[key] = float(total)
         else:
             state.pop(key, None)
+
+    # Two one-ways count as a round trip: alert when together they beat round_trip.
+    pair_hits = []
+    limit = watchlist.alerts.get("round_trip")
+    if limit is not None and "two-one-ways" in watchlist.trips:
+        priced = obs.dropna(subset=["total_price"])
+        out, back = priced[priced["kind"] == "out"], priced[priced["kind"] == "back"]
+        for city in watchlist.destinations:
+            pair = _two_one_ways(watchlist, out, back, city)
+            if pair is None:
+                continue
+            key = (f"pair:{city}", "", "")
+            if pair[2] <= limit:
+                if key not in state or pair[2] < state[key]:
+                    pair_hits.append((city, pair))
+                    state[key] = float(pair[2])
+            else:
+                state.pop(key, None)
+
     today = run_date.isoformat()
-    rows = [dict(zip(ALERT_KEY, k), total_price=int(v)) for k, v in sorted(state.items()) if k[1] >= today]
+    rows = [dict(zip(ALERT_KEY, k), total_price=int(v)) for k, v in sorted(state.items()) if not k[1] or k[1] >= today]
     state_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows, columns=ALERT_KEY + ["total_price"]).to_csv(state_path, index=False)
-    if not hits:
+    if not hits and not pair_hits:
         return ""
     labels = {"round_trip": "往返票", "one_way": "单程"}
     limits = "，".join(f"{labels.get(k, k)} ≤ {_money(v)}" for k, v in watchlist.alerts.items())
     sections = []
+    if pair_hits:
+        sections += ["### 两张单程合计", "", _table(
+            ["城市", "去程", "回程", "合计"],
+            [[_city(c), _leg_line(o, names), _leg_line(b, names), f"**{_money(t)}**"] for c, (o, b, t) in pair_hits],
+        ), ""]
     for kind in ("rt", "out", "back"):
         rows_k = [r for r in hits if r["kind"] == kind]
         if rows_k:
             sections += [f"### {KIND_NAMES[kind]}", "", _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for r in rows_k]), ""]
-    return f"# 价格提醒\n\n{len(hits)} 张票新跌破提醒价，或比上次提醒时更便宜（{limits}）：\n\n" + "\n".join(sections).rstrip() + "\n"
+    count = len(hits) + len(pair_hits)
+    return f"# 价格提醒\n\n{count} 项新跌破提醒价，或比上次提醒时更便宜（{limits}；两张单程合计按往返价算）：\n\n" + "\n".join(sections).rstrip() + "\n"

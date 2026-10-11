@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import sys
 import time
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -78,8 +79,16 @@ def run_job(job: Job, today: date, fetch=google.search) -> tuple[dict, list[dict
 
     position_price = None
     if job.positioning is not None and best is not None:
+        positioning = job.positioning
+        if job.leg == "back" and best.arrive:
+            # Fly home from the gateway on the day this itinerary lands there,
+            # which after a long-haul from Asia can be the day after departure.
+            landed = date.fromisoformat(best.arrive[:10])
+            first = positioning.slices[0]
+            if landed != first.date:
+                positioning = replace(positioning, slices=(replace(first, date=landed),))
         try:
-            pos = fetch(job.positioning).cheapest
+            pos = fetch(positioning).cheapest
         except google.FetchError:
             pos = None
         if pos is not None:
@@ -190,7 +199,10 @@ def collect(
         jobs = [j for j in jobs if (j.series_key, j.depart.isoformat(), j.ret.isoformat() if j.ret else "") not in done]
     if limit:
         jobs = jobs[:limit]
-    log(f"{len(jobs)} searches for {today} ({len(watchlist.departure_dates(today))} departure dates)")
+    log(f"{len(jobs)} searches for {today}")
+    if not jobs:
+        log("nothing to search: every date in the watchlist has passed (or --only matched nothing); update [dates]")
+        return pd.DataFrame()
 
     cache: dict[str, google.Result] = {}
     requests = 0

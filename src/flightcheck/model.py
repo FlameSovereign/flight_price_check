@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import brier_score_loss, roc_auc_score
+from threadpoolctl import threadpool_limits
 
 from .config import ModelSettings
 
@@ -170,10 +171,15 @@ class _Model:
             min_samples_leaf=40,
             l2_regularization=1.0,
             random_state=0,
-        ).fit(train[self.columns], train["y"].astype(int))
+        )
+        # One thread: the data is small, and OpenMP threads competing with other
+        # work on a busy machine (a shared CI runner) can make this 30x slower.
+        with threadpool_limits(1):
+            self.clf.fit(train[self.columns], train["y"].astype(int))
 
     def p_drop(self, frame: pd.DataFrame) -> np.ndarray:
-        return self.clf.predict_proba(frame[self.columns])[:, 1]
+        with threadpool_limits(1):
+            return self.clf.predict_proba(frame[self.columns])[:, 1]
 
 
 def _trainable(labeled: pd.DataFrame) -> bool:

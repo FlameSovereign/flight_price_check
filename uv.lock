@@ -40,6 +40,7 @@ dependencies = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pandas" },
     { name = "scikit-learn" },
+    { name = "threadpoolctl" },
 ]
 
 [package.dev-dependencies]
@@ -52,6 +53,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "scikit-learn", specifier = ">=1.5" },
+    { name = "threadpoolctl", specifier = ">=3" },
 ]
 
 [package.metadata.requires-dev]
