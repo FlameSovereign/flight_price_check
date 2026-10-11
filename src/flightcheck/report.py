@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import sys
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from . import model
+from . import forecast, model
 from .config import Watchlist
 
 WEEKDAYS = "一二三四五六日"
@@ -109,7 +111,13 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
         (reports_dir / "latest.md").write_text(f"# 回国{_cabin(watchlist.cabin)}价格监控\n\n> {exc}\n", encoding="utf-8")
         (reports_dir / "alerts.md").unlink(missing_ok=True)
         return {"run_date": None, "alerts": False, "metrics": {"status": str(exc)}}
-    result = model.train(model.load_history(data_dir), watchlist.model)
+    history = model.load_history(data_dir)
+    result = model.train(history, watchlist.model)
+    try:
+        outlook = forecast.outlook(history, watchlist)
+    except Exception as exc:  # an experimental section must not cost the day's report (and its data commit)
+        print(f"forecast failed: {exc!r}", file=sys.stderr)
+        outlook = forecast.Outlook(None, status=f"预测出错：{exc!r}")
     signals = model.latest_signals(result, watchlist.model)
     obs = obs.merge(
         signals[["series_key", "depart", "ret", "p_drop", "signal", "hist_min", "hist_max", "hist_len"]],
@@ -125,9 +133,10 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     elif alert_path.exists():
         alert_path.unlink()
 
-    md = _render(watchlist, run_date, obs, names, result.metrics, alerts, missing)
+    md = _render(watchlist, run_date, obs, names, result.metrics, alerts, missing, outlook)
     (reports_dir / "latest.md").write_text(md, encoding="utf-8")
     (reports_dir / "model.json").write_text(json.dumps(result.metrics, ensure_ascii=False, indent=2) + "\n")
+    (reports_dir / "forecast.json").write_text(json.dumps(asdict(outlook), ensure_ascii=False, indent=2, default=str) + "\n")
     return {"run_date": str(run_date), "alerts": bool(alerts), "metrics": result.metrics}
 
 
@@ -234,7 +243,7 @@ def _leg_line(r, names) -> str:
             f"{r['route']}（{r['airlines']}）· 建议：{_signal(r)}")
 
 
-def _render(watchlist, run_date, obs, names, metrics, alerts, missing=None) -> str:
+def _render(watchlist, run_date, obs, names, metrics, alerts, missing=None, outlook=None) -> str:
     missing = missing or {}
     order = [s.key for s in watchlist.strategies]
     priced = obs.dropna(subset=["total_price"]).sort_values("total_price")
@@ -325,6 +334,8 @@ def _render(watchlist, run_date, obs, names, metrics, alerts, missing=None) -> s
             lines += [f"## 最便宜的 {TOP_N} 张{KIND_NAMES[kind]}", "",
                       _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for _, r in rows.head(TOP_N).iterrows()]), ""]
 
+    if outlook is not None:
+        lines += _forecast_section(outlook, names)
     lines += _model_section(metrics, watchlist)
     return "\n".join(lines).rstrip() + "\n"
 
@@ -379,6 +390,48 @@ def _paired_legs(watchlist: Watchlist, out: pd.DataFrame, back: pd.DataFrame, na
 
 def _cabin(cabin: str) -> str:
     return {"business": "商务舱", "first": "头等舱", "premium-economy": "超经舱", "economy": "经济舱"}.get(cabin, cabin)
+
+
+def _chance(p: float) -> str:
+    return "<1%" if p < 0.005 else ">99%" if p > 0.995 else f"{p:.0%}"
+
+
+def _forecast_section(o: forecast.Outlook, names: dict) -> list[str]:
+    title = f"两张单程能不能凑到 {_money(o.target)}？" if o.target else "单程价格走势"
+    lines = [f"## 远期预测：{title}（实验性）", ""]
+    if o.status != "ok":
+        return lines + [f"- {o.status}", ""]
+    when = [f"{c.month}/{c.day} 前" for c in o.checkpoints]
+    lines += [
+        f"用最近 {forecast.TRAIN_DAYS} 天的价格变化，给每段单程模拟 {forecast.N_PATHS:,} 条未来的每日价格走势"
+        "（两个模拟器各算一遍取平均：一个照搬相似状态下真实发生过的涨跌，一个把票价当成在几个舱位档位之间跳）。",
+        "",
+        f"> ⚠️ 回测只验证到 {forecast.RANGE_DAYS} 天以内（两个检验时点，误差比随机游走小约三到六成）。更远的概率只是“如果接下来几个月和最近一样”的推演："
+        "它不知道航司春季放出便宜夏季往返价这类事件。那种票一出现，每日任务会直接提醒。",
+        "",
+    ]
+    if o.split is not None:
+        out, back = o.split
+        lines += [
+            f"**凑到 {_money(o.target)} 胜算最大的分法：去程 ≤ {_money(out)}、回程 ≤ {_money(back)}**"
+            "（两段分开买，按两段走势互不相关估算；可以照这两个价设提醒）",
+            "",
+            _table([""] + when, [["两段都买到"] + [_chance(p) for p in o.pair_hit]]),
+            "",
+        ]
+    rows = []
+    for leg in o.legs:
+        lo, mid, hi = leg.range30
+        rows.append(
+            [KIND_NAMES[leg.kind], f"{names.get(leg.strategy, leg.strategy)} · {_city(leg.city)}", _day(str(leg.depart)),
+             _money(leg.price), f"{_money(lo)}–{_money(hi)}（中位 {_money(mid)}）",
+             f"≤ {_money(leg.target)}" if leg.target else "—"]
+            + ([_chance(p) for p in leg.hit] if leg.hit else ["—"] * len(when))
+        )
+    headers = ["航段", "走法", "日期", "今天", f"{forecast.RANGE_DAYS} 天后（80% 区间）", "目标"] + when
+    lines += [f"每个走法今天最便宜的日期，以及在各日期前至少有一天跌到目标价的概率（数据截至 {o.as_of}）：", "",
+              _table(headers, rows), ""]
+    return lines
 
 
 POLICY_NAMES = {"model": "模型", "rule": "规则", "buy-now": "直接买"}
