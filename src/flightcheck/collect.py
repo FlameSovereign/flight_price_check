@@ -140,6 +140,16 @@ def _merge_csv(path: Path, new: pd.DataFrame, key: list[str]) -> None:
     new.to_csv(path, index=False)
 
 
+def _done(data_dir: Path, today: date) -> set[tuple[str, str, str]]:
+    """Searches already recorded for `today`."""
+    path = data_dir / "observations.csv"
+    if not path.exists():
+        return set()
+    obs = pd.read_csv(path, dtype=str, keep_default_na=False)
+    obs = obs[obs["run_date"] == today.isoformat()]
+    return set(zip(obs["series_key"], obs["depart"], obs["ret"]))
+
+
 def _save(data_dir: Path, today: date, observations: list, history: list, itineraries: list) -> None:
     if observations:
         _merge_csv(data_dir / "observations.csv", pd.DataFrame(observations), ["run_date", "series_key", "depart", "ret"])
@@ -166,6 +176,7 @@ def collect(
     limit: int | None = None,
     only: set[str] | None = None,
     max_minutes: float | None = None,
+    resume: bool = False,
     fetch=google.search,
     log=print,
     clock=time.monotonic,
@@ -174,6 +185,9 @@ def collect(
     jobs = watchlist.jobs(today)
     if only:
         jobs = [j for j in jobs if j.strategy.key in only or j.city in only or j.leg in only]
+    if resume:
+        done = _done(data_dir, today)
+        jobs = [j for j in jobs if (j.series_key, j.depart.isoformat(), j.ret.isoformat() if j.ret else "") not in done]
     if limit:
         jobs = jobs[:limit]
     log(f"{len(jobs)} searches for {today} ({len(watchlist.departure_dates(today))} departure dates)")

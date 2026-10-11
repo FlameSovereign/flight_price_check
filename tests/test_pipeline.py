@@ -327,3 +327,30 @@ def test_fixed_windows_pair_every_outbound_with_every_return(tmp_path):
     assert info["alerts"] and "往返票" in (reports / "alerts.md").read_text()
     # Windows drop dates that have passed.
     assert all(j.depart > date(2027, 5, 5) for j in wl.jobs(date(2027, 5, 5)) if j.leg == "out")
+
+
+def test_round_trip_pairs_can_be_sparser_than_single_legs():
+    wl = config.load(FIXTURE)
+    wl.trips = ("round-trip", "two-one-ways")
+    wl.outbound = config.DateRange(date(2027, 5, 1), date(2027, 5, 9), 2)  # 5 dates
+    wl.inbound = config.DateRange(date(2027, 8, 1), date(2027, 8, 7), 3)  # 3 dates
+    wl.round_trip_every = 2
+    jobs = wl.jobs(date(2026, 10, 11))
+    rt = {(j.depart, j.ret) for j in jobs if j.ret}
+    assert {d for d, _ in rt} == {date(2027, 5, 1), date(2027, 5, 5), date(2027, 5, 9)}
+    assert {r for _, r in rt} == {date(2027, 8, 1), date(2027, 8, 7)}
+    assert len({j.depart for j in jobs if j.leg == "out" and not j.ret}) == 5
+
+
+def test_resume_skips_searches_already_done_today(tmp_path):
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    calls = []
+    counting = lambda s: calls.append(1) or _fake_fetch(s)  # noqa: E731
+    collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=8, fetch=counting, log=lambda *_: None)
+    first = len(calls)
+    # With resume, --limit counts the searches still to do.
+    collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=4, resume=True, fetch=counting, log=lambda *_: None)
+    assert len(calls) - first <= 4 + 4  # 4 new searches (+ at most their positioning)
+    obs = pd.read_csv(tmp_path / "observations.csv")
+    assert len(obs) == 12 and not obs.duplicated(subset=["series_key", "depart"]).any()

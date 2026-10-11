@@ -17,8 +17,10 @@ request_delay_seconds = 1.0 # pause between Google requests; be polite
 [dates]
 # 你的行程：5 月回国、8 月回美国。设了 outbound / return，就只扫这两个窗口：
 # 每个去程日期都和每个回程日期配对查往返票，两个窗口的日期也各自查单程。
-outbound = { from = "2027-05-01", to = "2027-05-31", step_days = 4 }
-return = { from = "2027-08-01", to = "2027-08-25", step_days = 6 }
+# 便宜的舱位按天开关（实测 5/15 比前后两天便宜 $500），所以单程扫得密一些。
+outbound = { from = "2027-05-01", to = "2027-05-31", step_days = 2 }
+return = { from = "2027-08-01", to = "2027-08-25", step_days = 3 }
+round_trip_every = 2   # 往返票只用每隔一个日期配对（去程每 4 天 × 回程每 6 天），控制搜索量
 
 # 没设 outbound / return 时，改用滚动网格：
 # 扫描未来 start_days..end_days 天内的出发日，每 step_days 天一个。

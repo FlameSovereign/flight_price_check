@@ -93,6 +93,7 @@ class Watchlist:
     alerts: dict[str, float] = field(default_factory=dict)  # "round_trip" / "one_way" -> price
     outbound: DateRange | None = None  # fixed travel windows; None = rolling grid
     inbound: DateRange | None = None
+    round_trip_every: int = 1  # pair only every n-th window date for round trips (fewer searches)
 
     def departure_dates(self, today: date) -> list[date]:
         first = today + timedelta(days=self.start_days)
@@ -149,8 +150,9 @@ class Watchlist:
                 for strategy, city, airports in places:
                     add(self._return_job(strategy, city, airports, day, None))
         if "round-trip" in self.trips:
-            for depart in out_dates:
-                for ret in in_dates:
+            k = self.round_trip_every
+            for depart in out_dates[::k]:
+                for ret in in_dates[::k]:
                     if ret > depart:
                         for strategy, city, airports in places:
                             add(self._job(strategy, city, airports, depart, ret))
@@ -249,6 +251,7 @@ def load(path: str | Path) -> Watchlist:
         alerts={k: float(v) for k, v in raw.get("alerts", {}).items()},
         outbound=outbound,
         inbound=inbound,
+        round_trip_every=max(1, int(dates.get("round_trip_every", 1))),
     )
 
 
