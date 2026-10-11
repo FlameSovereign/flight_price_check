@@ -1,0 +1,68 @@
+{
+  "samples": 10958,
+  "series": 350,
+  "first_obs": "2026-08-11",
+  "last_obs": "2026-10-11",
+  "horizon_days": 14,
+  "drop_threshold": 0.03,
+  "folds": [
+    {
+      "start": "2026-09-07",
+      "end": "2026-09-13",
+      "train": 1790,
+      "test": 1834,
+      "test_rate": 0.235,
+      "auc": 0.697,
+      "episodes": 1834,
+      "model_saving_pct": 0.11,
+      "rule_saving_pct": 8.64,
+      "oracle_saving_pct": 11.19,
+      "model_wait_share": 0.119,
+      "rule_wait_share": 0.495
+    },
+    {
+      "start": "2026-09-14",
+      "end": "2026-09-20",
+      "train": 3622,
+      "test": 1834,
+      "test_rate": 0.073,
+      "auc": 0.748,
+      "episodes": 1834,
+      "model_saving_pct": -0.1,
+      "rule_saving_pct": 0.58,
+      "oracle_saving_pct": 2.43,
+      "model_wait_share": 0.128,
+      "rule_wait_share": 0.492
+    },
+    {
+      "start": "2026-09-21",
+      "end": "2026-09-27",
+      "train": 5456,
+      "test": 1834,
+      "test_rate": 0.045,
+      "auc": 0.883,
+      "episodes": 1834,
+      "model_saving_pct": 0.21,
+      "rule_saving_pct": -0.32,
+      "oracle_saving_pct": 0.67,
+      "model_wait_share": 0.128,
+      "rule_wait_share": 0.493
+    }
+  ],
+  "auc": 0.776,
+  "brier": 0.1447,
+  "brier_base": 0.107,
+  "test_samples": 5502,
+  "test_base_rate": 0.118,
+  "backtest": {
+    "episodes": 5502,
+    "model_saving_pct": 0.07,
+    "rule_saving_pct": 2.97,
+    "oracle_saving_pct": 4.76,
+    "model_wait_share": 0.125,
+    "rule_wait_share": 0.493
+  },
+  "base_rate": 0.131,
+  "status": "ok",
+  "policy": "rule"
+}
