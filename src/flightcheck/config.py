@@ -23,15 +23,16 @@ class Strategy:
     connecting: tuple[str, ...] = ()
     via: tuple[str, ...] = ()
     position_from: tuple[str, ...] = ()
+    position_days_before: int = 1  # fly the separate positioning ticket this many days early
 
 
 @dataclass(frozen=True)
 class ModelSettings:
     horizon_days: int = 14
     drop_threshold: float = 0.03
-    buy_below: float = 0.35
     wait_above: float = 0.55
     min_days_out: int = 21
+    rule_margin: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -102,7 +103,7 @@ class Watchlist:
         search = Search(tuple(slices), cabin=self.cabin, **common)
         positioning = None
         if strategy.position_from:
-            pos = [Slice(depart, strategy.position_from, strategy.origin)]
+            pos = [Slice(depart - timedelta(days=strategy.position_days_before), strategy.position_from, strategy.origin)]
             if ret is not None:
                 pos.append(Slice(ret, strategy.origin, strategy.position_from))
             positioning = Search(tuple(pos), cabin="economy", **common)
@@ -140,6 +141,7 @@ def load(path: str | Path) -> Watchlist:
                 connecting=_codes(s.get("connecting")),
                 via=_codes(s.get("via")),
                 position_from=_codes(s.get("position_from")),
+                position_days_before=int(s.get("position_days_before", 1)),
             )
         )
     if not strategies:
@@ -163,6 +165,6 @@ def load(path: str | Path) -> Watchlist:
         windows=windows,
         destinations=destinations,
         strategies=strategies,
-        model=ModelSettings(**raw.get("model", {})),
+        model=ModelSettings(**{k: v for k, v in raw.get("model", {}).items() if k in ModelSettings.__dataclass_fields__}),
         alerts={k: float(v) for k, v in raw.get("alerts", {}).items()},
     )

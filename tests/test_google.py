@@ -85,3 +85,38 @@ def test_parse_html_extracts_ds1_script():
 def test_parse_payload_tolerates_missing_blocks():
     result = google.parse_payload([None] * 4)
     assert result.itineraries == [] and result.insight is None and result.cheapest is None
+
+
+def test_parse_html_raises_fetch_error_on_truncated_json():
+    html = '<script class="ds:1">AF_initDataCallback({key: \'ds:1\', data:[[1, 2, {"cut, sideChannel: {}});</script>'
+    try:
+        google.parse_html(html)
+    except google.FetchError:
+        pass
+    else:
+        raise AssertionError("expected FetchError")
+
+
+def test_fetch_html_retries_on_incomplete_read(monkeypatch):
+    import http.client
+
+    page = f'<script class="ds:1">AF_initDataCallback({{data:{json.dumps(_payload())}, sideChannel: {{}}}});</script>'
+    calls = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            calls.append(1)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b"partial")
+            return page.encode()
+
+    monkeypatch.setattr(google.urllib.request, "urlopen", lambda req, timeout: Resp())
+    monkeypatch.setattr(google.time, "sleep", lambda s: None)
+    assert google.parse_html(google.fetch_html("https://example.invalid")).cheapest.price == 4290
+    assert len(calls) == 2

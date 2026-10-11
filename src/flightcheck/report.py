@@ -108,7 +108,10 @@ def _deal_row(r, names, with_city=True) -> list[str]:
     return cells
 
 
-DEAL_HEADERS = ["出发", "城市", "策略", "总价", "航线 / 航司", "航班", "Google 判断（常见区间）", "历史最低", "P(14天内降≥3%)", "建议"]
+def _deal_headers(watchlist: Watchlist) -> list[str]:
+    m = watchlist.model
+    return ["出发", "城市", "策略", "总价", "航线 / 航司", "航班", "Google 判断（常见区间）", "历史最低（不含定位）",
+            f"P({m.horizon_days}天内降≥{m.drop_threshold:.0%})", "建议"]
 
 
 def _render(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> str:
@@ -118,7 +121,7 @@ def _render(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> 
         "",
         f"> 数据：Google Flights · {trip} · {watchlist.adults} 成人 · {watchlist.currency} · "
         f"今天共 {len(obs)} 次搜索，{obs['total_price'].notna().sum()} 次有结果。"
-        "总价 = 主航段 + 定位航段（如有，分开出票的经济舱）。",
+        "总价 = 主航段 + 定位航段（如有：提前一天、分开出票的经济舱，不含酒店；查不到定位航段时不给总价）。",
         "",
     ]
     if alerts:
@@ -146,7 +149,7 @@ def _render(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> 
     headers = ["策略"] + [f"{_city(c)} {k}" for c in watchlist.destinations for k in ("最低", "中位数")]
     lines += ["### 策略对比（所有扫描日期）", "", _table(headers, summary_rows), ""]
 
-    lines += [f"## 最便宜的 {TOP_N} 个组合", "", _table(DEAL_HEADERS, [_deal_row(r, names) for _, r in priced.head(TOP_N).iterrows()]), ""]
+    lines += [f"## 最便宜的 {TOP_N} 个组合", "", _table(_deal_headers(watchlist), [_deal_row(r, names) for _, r in priced.head(TOP_N).iterrows()]), ""]
 
     lines += ["## 按出发日期对比策略（总价）", "", "每行最低价加粗。“—” = 当天该策略没搜到航班。", ""]
     for city in watchlist.destinations:
@@ -173,42 +176,61 @@ def _cabin(cabin: str) -> str:
     return {"business": "商务舱", "first": "头等舱", "premium-economy": "超经舱", "economy": "经济舱"}.get(cabin, cabin)
 
 
+POLICY_NAMES = {"model": "模型", "rule": "规则", "buy-now": "直接买"}
+
+
 def _model_section(m: dict, watchlist: Watchlist) -> list[str]:
     s = watchlist.model
     lines = [
         "## 模型：现在买还是再等等？",
         "",
-        f"问题定义：从今天起 {s.horizon_days} 天内，这个日期/策略的最低价会不会比现在再便宜至少 {s.drop_threshold:.0%}？"
-        f"P ≥ {s.wait_above:.0%} 建议**等**，P ≤ {s.buy_below:.0%} 建议**买**，中间是**观望**；"
-        f"离出发不足 {s.min_days_out} 天一律建议买。",
+        f"问题：从今天起 {s.horizon_days} 天内，这个日期/策略的最低价会不会比现在再便宜至少 {s.drop_threshold:.0%}？",
         "",
-        f"- 训练数据：{m.get('series', 0)} 条价格序列，{m.get('samples', 0)} 个带标签样本，"
-        f"观测日期 {m.get('first_obs', '?')} → {m.get('last_obs', '?')}",
+        "三种下单策略，用过去几周的数据逐周回放（每周都只用当时之前的数据训练），比较“开始盯价后按策略下单”比“立刻买”平均省多少：",
+        "",
+        f"- **模型**：P(降价) ≥ {s.wait_above:.0%} 就等；",
+        f"- **规则**：价格比 28 天最低价贵 {s.rule_margin:.0%} 以上就等（便宜的舱位最近开过，可能再开）；",
+        "- **直接买**：永远不等。",
+        "",
+        f"离出发不足 {s.min_days_out} 天一律买。报告里的“建议”列跟随过去几周省得最多的那个策略。",
+        "",
+        f"- 数据：{m.get('series', 0)} 条价格序列，{m.get('samples', 0):,} 个带标签样本，观测日期 {m.get('first_obs', '?')} → {m.get('last_obs', '?')}",
     ]
     if m.get("status") != "ok":
-        lines += [f"- 状态：{m.get('status')}", ""]
+        lines += [f"- 状态：{m.get('status')}；建议列暂按“直接买”。", ""]
         return lines
     lines.append(f"- 整体基准：{m.get('base_rate', 0):.0%} 的样本在 {s.horizon_days} 天内降价 ≥{s.drop_threshold:.0%}")
-    if "auc" in m:
-        lines += [
-            f"- 时间切分验证（{m['test_start']} 之后为测试集，训练集 {m['train_samples']} / 测试集 {m['test_samples']}）："
-            f"AUC {m['auc']}，Brier {m['brier']}（只猜基准率是 {m['brier_base']}）",
-        ]
-        bt = m.get("backtest", {})
-        if bt.get("episodes"):
-            lost = bt.get("model_wait_lost_share")
-            lines += [
-                f"- 回测 {bt['episodes']} 次“开始盯价→按建议下单”：相比立刻买，"
-                f"模型平均省 **{bt['model_saving_pct']}%**，简单规则（比 28 天最低贵 5% 就等）省 {bt['rule_saving_pct']}%，"
-                f"事后诸葛亮的理论上限 {bt['oracle_saving_pct']}%。"
-                f"模型选择等待的占 {bt['model_wait_share']:.0%}"
-                + (f"，其中 {lost:.0%} 等完反而更贵。" if lost is not None else "。"),
-            ]
-    else:
-        lines.append(f"- 验证：{m.get('evaluation', '—')}")
+    folds = m.get("folds") or []
+    if not folds:
+        lines += [f"- 验证：{m.get('evaluation', '—')}", ""]
+        return lines
+    bt = m.get("backtest", {})
+    policy = m.get("policy", "buy-now")
     lines += [
+        f"- 当前建议跟随：**{POLICY_NAMES.get(policy, policy)}**",
+        f"- 预测能力：平均 AUC {m['auc'] if m.get('auc') is not None else '—'}，"
+        f"Brier {m['brier']}（只猜训练期基准率是 {m['brier_base']}，越低越好）",
         "",
-        "注意：同一航线相邻日期的价格高度相关，有效样本远少于表面数字；数据越攒越多（每天 +1 天）结果才越可信。",
+        _table(
+            ["测试周", "回放次数", "当周降价比例", "AUC", "模型省", "规则省", "事后最优"],
+            [
+                [
+                    f"{f['start']} → {f['end']}",
+                    f.get("episodes", 0),
+                    f"{f['test_rate']:.0%}",
+                    f.get("auc", "—"),
+                    f"{f.get('model_saving_pct', 0)}%",
+                    f"{f.get('rule_saving_pct', 0)}%",
+                    f"{f.get('oracle_saving_pct', 0)}%",
+                ]
+                for f in folds
+            ]
+            + [["**合计**", bt.get("episodes", 0), f"{m['test_base_rate']:.0%}", m.get("auc", "—"),
+                f"**{bt.get('model_saving_pct', 0)}%**", f"**{bt.get('rule_saving_pct', 0)}%**", f"{bt.get('oracle_saving_pct', 0)}%"]],
+        ),
+        "",
+        "注意：同一航线相邻日期的价格高度相关（同一个舱位开关会同时影响几十个日期），有效样本远少于表面数字。"
+        "每天的定时任务都会多一周可回放的数据，建议会自动跟随表现更好的策略。",
         "",
     ]
     return lines
@@ -227,4 +249,4 @@ def _alerts(priced: pd.DataFrame, previous: pd.DataFrame, watchlist: Watchlist, 
         return ""
     rows = [_deal_row(r, names) for r in sorted(hits, key=lambda r: r["total_price"])]
     limits = "，".join(f"{_city(c)} ≤ {_money(v)}" for c, v in watchlist.alerts.items())
-    return f"# 价格提醒\n\n{len(hits)} 个组合新跌破提醒价（{limits}）：\n\n" + _table(DEAL_HEADERS, rows) + "\n"
+    return f"# 价格提醒\n\n{len(hits)} 个组合新跌破提醒价（{limits}）：\n\n" + _table(_deal_headers(watchlist), rows) + "\n"

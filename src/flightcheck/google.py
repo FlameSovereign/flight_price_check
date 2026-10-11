@@ -12,6 +12,7 @@ two months of past prices for that exact route, date and cabin.
 
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import time
@@ -79,7 +80,7 @@ def fetch_html(url: str, *, timeout: float = 30.0, retries: int = 3) -> str:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 html = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (http.client.HTTPException, OSError) as exc:  # URLError, timeouts, resets, TLS errors
             last_error = exc
             continue
         if _SCRIPT_MARKER in html:
@@ -103,7 +104,11 @@ def parse_html(html: str) -> Result:
     data = script.split("data:", 1)[1].rsplit(",", 1)[0]
     if data.rstrip().endswith("errorHasStatus: true"):
         return Result(itineraries=[], insight=None)
-    return parse_payload(json.loads(data))
+    try:
+        payload = json.loads(data)
+    except ValueError as exc:
+        raise FetchError(f"flight data is not valid JSON: {exc}") from exc
+    return parse_payload(payload)
 
 
 def parse_payload(payload: list) -> Result:

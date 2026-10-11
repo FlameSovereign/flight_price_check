@@ -127,3 +127,86 @@ def test_report_renders_and_alerts_only_on_new_lows(tmp_path):
     collect.collect(wl, data, today=date(2026, 10, 11), limit=16, fetch=_fake_fetch, log=lambda *_: None)
     info = report.build(wl, data, reports)
     assert not info["alerts"] and not (reports / "alerts.md").exists()
+
+
+def test_one_unexpected_error_does_not_lose_the_run(tmp_path):
+    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl.request_delay = 0
+    calls = []
+
+    def flaky(search):
+        calls.append(1)
+        if len(calls) == 3:
+            raise ValueError("garbled page")
+        return _fake_fetch(search)
+
+    obs = collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=8, fetch=flaky, log=lambda *_: None)
+    assert len(obs) == 7
+    assert len(pd.read_csv(tmp_path / "observations.csv")) == 7
+
+
+def test_missing_positioning_leaves_total_empty(tmp_path):
+    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl.request_delay = 0
+
+    def no_positioning(search):
+        if "IAH" in search.slices[0].destinations:
+            return google.Result([], None)
+        return _fake_fetch(search)
+
+    obs = collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=8, fetch=no_positioning, log=lambda *_: None)
+    iah = obs[obs["strategy"] == "iah-ana"].iloc[0]
+    assert iah["price"] > 0 and pd.isna(iah["total_price"])
+
+
+def test_positioning_flies_the_day_before():
+    wl = config.load(ROOT / "config" / "watchlist.toml")
+    job = next(j for j in wl.jobs(date(2026, 10, 11)) if j.positioning is not None)
+    assert job.positioning.slices[0].date == job.depart - timedelta(days=1)
+
+
+def test_same_day_rerun_merges_itineraries(tmp_path):
+    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl.request_delay = 0
+    today = date(2026, 10, 11)
+    collect.collect(wl, tmp_path, today=today, limit=8, fetch=_fake_fetch, log=lambda *_: None)
+    path = tmp_path / "itineraries" / "2026-10-11.csv.gz"
+    before = pd.read_csv(path)
+    collect.collect(wl, tmp_path, today=today, limit=8, only={"atl-tk"}, fetch=_fake_fetch, log=lambda *_: None)
+    after = pd.read_csv(path)
+    key = ["series_key", "depart", "rank"]
+    assert not after.duplicated(subset=key).any()  # re-fetched searches replaced, not appended
+    kept = before.merge(after[key], on=key, how="left", indicator=True)
+    assert (kept["_merge"] == "both").all()  # nothing from the first run was lost
+
+
+def test_label_window_does_not_span_a_gap():
+    days = list(pd.date_range("2026-09-01", "2026-09-21")) + list(pd.date_range("2026-09-28", "2026-10-11"))
+    prices = [5000] * len(days)
+    prices[days.index(pd.Timestamp("2026-10-01"))] = 4000
+    hist = pd.DataFrame({"series_key": "a:b", "depart": pd.Timestamp("2027-03-01"), "ret": "", "obs_date": days,
+                         "price": prices, "source": "observed"})
+    panel = model.add_targets(model.build_panel(hist), horizon=14, threshold=0.03)
+    row = panel[panel["obs_date"] == pd.Timestamp("2026-09-14")].iloc[0]
+    # 09-22..09-24 are forward-filled, then the series breaks; the 10-01 drop is 17 days away.
+    assert pd.isna(row["y"]) or row["y"] == 0.0
+    assert panel["seg"].nunique() == 2
+
+
+def test_cross_section_works_for_round_trips():
+    rows = []
+    for k in range(10):
+        depart = pd.Timestamp("2027-01-01") + pd.Timedelta(days=6 * k)
+        for d in pd.date_range("2026-09-01", periods=20):
+            rows.append({"series_key": "a:b", "depart": depart, "ret": str((depart + pd.Timedelta(days=30)).date()),
+                         "obs_date": d, "price": 4000 + 50 * k, "source": "google"})
+    panel = model.add_features(model.build_panel(pd.DataFrame(rows)))
+    assert panel["r_xsec"].notna().mean() > 0.5
+
+
+def test_train_survives_features_that_are_all_missing():
+    # 20 days of history: the 14-day change is empty for every training row of the first fold.
+    settings = config.ModelSettings(horizon_days=3, min_days_out=0)
+    result = model.train(_synthetic_history(n_series=30, days=20), settings)
+    assert result.metrics["status"] == "ok"
+    assert result.metrics["policy"] in model.POLICIES

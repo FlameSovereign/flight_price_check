@@ -84,8 +84,12 @@ def run_job(job: Job, today: date, fetch=google.search) -> tuple[dict, list[dict
             position_price = pos.price
             obs.update(position_route=pos.route, position_airlines=" + ".join(pos.airlines))
     obs["position_price"] = position_price
-    if best is not None:
+    # Without the positioning leg the total would look cheaper than the trip
+    # really is, so leave it empty rather than understate it.
+    if best is not None and (job.positioning is None or position_price is not None):
         obs["total_price"] = best.price + (position_price or 0)
+    else:
+        obs["total_price"] = None
 
     base = {"series_key": job.series_key, "depart": obs["depart"], "ret": obs["ret"]}
     history = []
@@ -134,6 +138,24 @@ def _merge_csv(path: Path, new: pd.DataFrame, key: list[str]) -> None:
     new.to_csv(path, index=False)
 
 
+def _save(data_dir: Path, today: date, observations: list, history: list, itineraries: list) -> None:
+    if observations:
+        _merge_csv(data_dir / "observations.csv", pd.DataFrame(observations), ["run_date", "series_key", "depart", "ret"])
+    if history:
+        _merge_csv(data_dir / "history.csv", pd.DataFrame(history), HISTORY_KEY)
+    if itineraries:
+        path = data_dir / "itineraries" / f"{today.isoformat()}.csv.gz"
+        new = pd.read_csv(io.StringIO(_tidy(pd.DataFrame(itineraries)).to_csv(index=False)), dtype=str, keep_default_na=False)
+        if path.exists():
+            # Same-day rerun: replace only the searches this run fetched again.
+            old = pd.read_csv(path, dtype=str, keep_default_na=False)
+            refetched = set(map(tuple, new[["series_key", "depart", "ret"]].to_numpy()))
+            keep = [tuple(r) not in refetched for r in old[["series_key", "depart", "ret"]].to_numpy()]
+            new = pd.concat([old[keep], new], ignore_index=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new.to_csv(path, index=False)
+
+
 def collect(
     watchlist: Watchlist,
     data_dir: Path,
@@ -168,35 +190,32 @@ def collect(
 
     observations, history, itineraries = [], [], []
     failures = consecutive = 0
-    for i, job in enumerate(jobs, start=1):
-        try:
-            obs, hist, its = run_job(job, today, fetch=polite_fetch)
-        except google.FetchError as exc:
-            failures += 1
-            consecutive += 1
-            log(f"[{i}/{len(jobs)}] {job.series_key} {job.depart}: FAILED {exc}")
-            if consecutive >= MAX_CONSECUTIVE_FAILURES:
-                log("too many consecutive failures; Google is probably blocking us, stopping early")
-                break
-            continue
-        consecutive = 0
-        observations.append(obs)
-        history.extend(hist)
-        itineraries.extend(its)
-        price = f"${obs['total_price']:,}" if obs.get("total_price") else "no flights"
-        log(f"[{i}/{len(jobs)}] {job.series_key} {job.depart}: {price} {obs['route']}")
+    try:
+        for i, job in enumerate(jobs, start=1):
+            try:
+                obs, hist, its = run_job(job, today, fetch=polite_fetch)
+            except Exception as exc:  # one bad page must not cost the whole day's data
+                failures += 1
+                consecutive += 1
+                log(f"[{i}/{len(jobs)}] {job.series_key} {job.depart}: FAILED {type(exc).__name__}: {exc}")
+                if consecutive >= MAX_CONSECUTIVE_FAILURES:
+                    log("too many consecutive failures; Google is probably blocking us, stopping early")
+                    break
+                continue
+            consecutive = 0
+            observations.append(obs)
+            history.extend(hist)
+            itineraries.extend(its)
+            price = f"${obs['total_price']:,}" if obs.get("total_price") else "no total"
+            log(f"[{i}/{len(jobs)}] {job.series_key} {job.depart}: {price} {obs['route']}")
+    finally:
+        # Keep whatever was collected even if the loop is interrupted.
+        _save(data_dir, today, observations, history, itineraries)
 
     if not observations:
         raise RuntimeError(f"all {len(jobs)} searches failed")
-    obs_df = pd.DataFrame(observations)
-    _merge_csv(data_dir / "observations.csv", obs_df, ["run_date", "series_key", "depart", "ret"])
-    if history:
-        _merge_csv(data_dir / "history.csv", pd.DataFrame(history), HISTORY_KEY)
-    if itineraries:
-        path = data_dir / "itineraries" / f"{today.isoformat()}.csv.gz"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _tidy(pd.DataFrame(itineraries)).to_csv(path, index=False)
     log(f"done: {len(observations)} ok, {failures} failed")
     if failures:
         print(f"warning: {failures} searches failed", file=sys.stderr)
+    obs_df = pd.DataFrame(observations)
     return obs_df
