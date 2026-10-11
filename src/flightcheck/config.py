@@ -42,6 +42,21 @@ class ModelSettings:
 
 
 @dataclass(frozen=True)
+class DateRange:
+    start: date
+    end: date
+    step: int = 1
+
+    def dates(self, today: date) -> list[date]:
+        out, day = [], self.start
+        while day <= self.end:
+            if day > today:
+                out.append(day)
+            day += timedelta(days=self.step)
+        return out
+
+
+@dataclass(frozen=True)
 class Job:
     """One search to run: a strategy, a destination and a departure date."""
 
@@ -63,7 +78,7 @@ class Job:
 @dataclass
 class Watchlist:
     cabin: str
-    trip: str
+    trips: tuple[str, ...]
     return_after_days: int
     adults: int
     currency: str
@@ -75,7 +90,9 @@ class Watchlist:
     destinations: dict[str, tuple[str, ...]]
     strategies: list[Strategy]
     model: ModelSettings
-    alerts: dict[str, float] = field(default_factory=dict)
+    alerts: dict[str, float] = field(default_factory=dict)  # "round_trip" / "one_way" -> price
+    outbound: DateRange | None = None  # fixed travel windows; None = rolling grid
+    inbound: DateRange | None = None
 
     def departure_dates(self, today: date) -> list[date]:
         first = today + timedelta(days=self.start_days)
@@ -94,16 +111,50 @@ class Watchlist:
         return sorted(dates)
 
     def jobs(self, today: date) -> list[Job]:
-        stay = timedelta(days=self.return_after_days)
-        out = []
-        for depart in self.departure_dates(today):
-            ret = depart + stay if self.trip == "round-trip" else None
-            for strategy in self.strategies:
-                for city, airports in self.destinations.items():
-                    out.append(self._job(strategy, city, airports, depart, ret))
-                    if self.trip == "two-one-ways":
-                        out.append(self._return_job(strategy, city, airports, depart + stay, depart))
-        return out
+        """Every search for `today`, deduplicated, in the order they should run.
+
+        With fixed windows ([dates] outbound/return) every outbound date pairs
+        with every return date; otherwise the rolling grid is used and the
+        return is `return_after_days` after each departure.
+        """
+        legs = "one-way" in self.trips or "two-one-ways" in self.trips
+        jobs: dict[tuple, Job] = {}
+
+        def add(job: Job) -> None:
+            jobs.setdefault((job.series_key, job.depart, job.ret), job)
+
+        places = [(s, c, a) for s in self.strategies for c, a in self.destinations.items()]
+        if self.outbound is None:
+            stay = timedelta(days=self.return_after_days)
+            for depart in self.departure_dates(today):
+                for strategy, city, airports in places:
+                    if legs:
+                        add(self._job(strategy, city, airports, depart, None))
+                    if "round-trip" in self.trips:
+                        add(self._job(strategy, city, airports, depart, depart + stay))
+                    if "two-one-ways" in self.trips:
+                        add(self._return_job(strategy, city, airports, depart + stay, depart))
+            return list(jobs.values())
+
+        # Fixed windows: single legs first (always on sale), round-trip pairs last,
+        # so a time budget that runs out drops pairs rather than whole directions.
+        out_dates = self.outbound.dates(today)
+        in_dates = self.inbound.dates(today) if self.inbound else []
+        if legs:
+            for depart in out_dates:
+                for strategy, city, airports in places:
+                    add(self._job(strategy, city, airports, depart, None))
+        if "two-one-ways" in self.trips:
+            for day in in_dates:
+                for strategy, city, airports in places:
+                    add(self._return_job(strategy, city, airports, day, None))
+        if "round-trip" in self.trips:
+            for depart in out_dates:
+                for ret in in_dates:
+                    if ret > depart:
+                        for strategy, city, airports in places:
+                            add(self._job(strategy, city, airports, depart, ret))
+        return list(jobs.values())
 
     def _job(self, strategy: Strategy, city: str, airports, depart: date, ret: date | None) -> Job:
         slices = [
@@ -121,7 +172,7 @@ class Watchlist:
             positioning = Search(tuple(pos), cabin="economy", **common)
         return Job(strategy, city, depart, ret, search, positioning, trip_depart=depart)
 
-    def _return_job(self, strategy: Strategy, city: str, airports, day: date, trip_depart: date) -> Job:
+    def _return_job(self, strategy: Strategy, city: str, airports, day: date, trip_depart: date | None) -> Job:
         common = dict(trip="one-way", adults=self.adults, currency=self.currency)
         search = Search((Slice(day, airports, strategy.origin, strategy.airlines, strategy.connecting),), cabin=self.cabin, **common)
         positioning = None
@@ -170,15 +221,20 @@ def load(path: str | Path) -> Watchlist:
     keys = [s.key for s in strategies]
     if len(set(keys)) != len(keys):
         raise ValueError(f"duplicate strategy keys in {keys}")
-    trip = search.get("trip", "one-way")
-    if trip not in TRIP_MODES:
-        raise ValueError(f"trip must be one of {TRIP_MODES}, got {trip!r}")
+    trips = search.get("trip", "one-way")
+    trips = tuple([trips] if isinstance(trips, str) else trips)
+    for trip in trips:
+        if trip not in TRIP_MODES:
+            raise ValueError(f"trip must be one of {TRIP_MODES}, got {trip!r}")
+    outbound, inbound = _range(dates.get("outbound")), _range(dates.get("return"))
+    if outbound and set(trips) & {"round-trip", "two-one-ways"} and not inbound:
+        raise ValueError("[dates] outbound is set, so round trips also need [dates] return")
     step = int(dates.get("step_days", 7))
     if step < 1:
         raise ValueError("step_days must be >= 1")
     return Watchlist(
         cabin=search.get("cabin", "business"),
-        trip=trip,
+        trips=trips,
         return_after_days=int(search.get("return_after_days", 30)),
         adults=int(search.get("adults", 1)),
         currency=search.get("currency", "USD"),
@@ -191,4 +247,15 @@ def load(path: str | Path) -> Watchlist:
         strategies=strategies,
         model=ModelSettings(**{k: v for k, v in raw.get("model", {}).items() if k in ModelSettings.__dataclass_fields__}),
         alerts={k: float(v) for k, v in raw.get("alerts", {}).items()},
+        outbound=outbound,
+        inbound=inbound,
     )
+
+
+def _range(raw) -> DateRange | None:
+    if not raw:
+        return None
+    start, end = date.fromisoformat(str(raw["from"])), date.fromisoformat(str(raw["to"]))
+    if end < start:
+        raise ValueError(f"date range ends before it starts: {raw}")
+    return DateRange(start, end, int(raw.get("step_days", 1)))

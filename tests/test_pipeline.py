@@ -14,8 +14,8 @@ def test_real_watchlist_loads_and_expands():
     wl = config.load(ROOT / "config" / "watchlist.toml")
     jobs = wl.jobs(date(2026, 10, 11))
     assert jobs
-    legs = 2 if wl.trip == "two-one-ways" else 1
-    assert len(jobs) == len(wl.departure_dates(date(2026, 10, 11))) * len(wl.strategies) * len(wl.destinations) * legs
+    keys = [(j.series_key, j.depart, j.ret) for j in jobs]
+    assert len(keys) == len(set(keys))
 
 
 def test_departure_dates_are_stable_across_days():
@@ -116,7 +116,7 @@ def test_report_renders_and_alerts_only_on_new_lows(tmp_path):
 
     wl = config.load(FIXTURE)
     wl.request_delay = 0
-    wl.alerts = {"shanghai": 99999}
+    wl.alerts = {"one_way": 99999}
     data, reports = tmp_path / "data", tmp_path / "reports"
     collect.collect(wl, data, today=date(2026, 10, 10), limit=16, fetch=_fake_fetch, log=lambda *_: None)
     info = report.build(wl, data, reports)
@@ -229,7 +229,7 @@ def test_alerts_survive_partial_runs_and_reruns(tmp_path):
 
     wl = config.load(FIXTURE)
     wl.request_delay = 0
-    wl.alerts = {"shanghai": 99999}
+    wl.alerts = {"one_way": 99999}
     data, reports = tmp_path / "data", tmp_path / "reports"
     run = lambda day, **kw: collect.collect(wl, data, today=day, fetch=_fake_fetch, log=lambda *_: None, **kw)  # noqa: E731
     run(date(2026, 10, 10), limit=16)
@@ -260,11 +260,11 @@ def test_round_trip_report_shows_return_dates_and_ignores_one_way_rows(tmp_path)
     wl.request_delay = 0
     data, reports = tmp_path / "data", tmp_path / "reports"
     collect.collect(wl, data, today=date(2026, 10, 11), limit=8, fetch=_fake_fetch, log=lambda *_: None)  # one-way
-    wl.trip, wl.return_after_days = "round-trip", 45
+    wl.trips, wl.return_after_days = ("round-trip",), 45
     collect.collect(wl, data, today=date(2026, 10, 11), limit=8, fetch=_fake_fetch, log=lambda *_: None)
     report.build(wl, data, reports)
     md = (reports / "latest.md").read_text()
-    assert "往返（停留 45 天）" in md and "回 2026-12-07" in md
+    assert "回程 = 出发后 45 天" in md and "回 2026-12-07" in md
     obs, _ = report.load_latest_run(data, wl)
     assert len(obs) == 8 and (obs["ret"] != "").all()
 
@@ -274,7 +274,7 @@ def test_two_one_ways_pairs_outbound_and_return_legs(tmp_path):
 
     wl = config.load(FIXTURE)
     wl.request_delay = 0
-    wl.trip, wl.return_after_days = "two-one-ways", 45
+    wl.trips, wl.return_after_days = ("two-one-ways",), 45
     jobs = wl.jobs(date(2026, 10, 11))
     back = [j for j in jobs if j.leg == "back"]
     assert len(back) == len(jobs) // 2
@@ -290,7 +290,7 @@ def test_two_one_ways_pairs_outbound_and_return_legs(tmp_path):
     assert obs["series_key"].str.endswith(":back").sum() == 8
     report.build(wl, data, reports)
     md = (reports / "latest.md").read_text()
-    assert "两张单程" in md and "最便宜的一趟" in md and "合计" in md and "回程" in md
+    assert "两张单程最低合计" in md and "按日期：两张单程合计" in md
 
 
 def test_time_budget_stops_early_and_keeps_data(tmp_path):
@@ -301,3 +301,29 @@ def test_time_budget_stops_early_and_keeps_data(tmp_path):
                           log=lambda *_: None, clock=lambda: next(ticks))
     assert 0 < len(obs) < 40
     assert len(pd.read_csv(tmp_path / "observations.csv")) == len(obs)
+
+
+def test_fixed_windows_pair_every_outbound_with_every_return(tmp_path):
+    from flightcheck import report
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    wl.trips = ("round-trip", "two-one-ways")
+    wl.outbound = config.DateRange(date(2027, 5, 1), date(2027, 5, 9), 4)  # 3 dates
+    wl.inbound = config.DateRange(date(2027, 8, 1), date(2027, 8, 7), 6)  # 2 dates
+    wl.alerts = {"round_trip": 99999, "one_way": 1}
+    jobs = wl.jobs(date(2026, 10, 11))
+    per_place = len(wl.strategies) * len(wl.destinations)
+    kinds = [("rt" if j.ret else j.leg) for j in jobs]
+    assert kinds.count("out") == 3 * per_place and kinds.count("back") == 2 * per_place
+    assert kinds.count("rt") == 3 * 2 * per_place
+    assert kinds.index("rt") > max(i for i, k in enumerate(kinds) if k != "rt")  # pairs run last
+
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    collect.collect(wl, data, today=date(2026, 10, 11), fetch=_fake_fetch, log=lambda *_: None)
+    info = report.build(wl, data, reports)
+    md = (reports / "latest.md").read_text()
+    assert "去程 \\ 回程" in md and "现在更便宜的买法" in md and "两张单程最低合计" in md
+    assert info["alerts"] and "往返票" in (reports / "alerts.md").read_text()
+    # Windows drop dates that have passed.
+    assert all(j.depart > date(2027, 5, 5) for j in wl.jobs(date(2027, 5, 5)) if j.leg == "out")

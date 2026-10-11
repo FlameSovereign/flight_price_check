@@ -71,6 +71,5 @@ min_days_out = 21     # 离出发不到这么多天就不建议再等
 rule_margin = 0.05    # 规则：比 28 天最低价贵这么多 → 便宜的舱位最近开过，可能再开，等
 
 [alerts]
-# 总价（含定位航段）低于该值时，GitHub Actions 会开一个 issue 提醒你。
-shanghai = 3800
-beijing = 3800
+round_trip = 5000
+one_way = 3800

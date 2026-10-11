@@ -3,16 +3,24 @@
 
 [search]
 cabin = "business"          # economy | premium-economy | business | first
+# 要比较的买法，可以同时写几种：
 # one-way       只查去程单程
-# round-trip    一张往返票（打折的商务舱往返票大多最长只能停留约 1 个月，超过就只剩贵的票）
-# two-one-ways  去程单程 + 回程单程分开买（停留超过 1 个月时通常最便宜），两段各自给买/等建议
-trip = "two-one-ways"
-return_after_days = 45      # 回程日期 = 出发日 + N 天（看假期改这个数）
+# round-trip    一张往返票（目前在售的打折商务舱往返票大多最长只能停留约 1 个月；
+#               更长停留的便宜往返票往往要等航司放出夏季运价）
+# two-one-ways  去程单程 + 回程单程分开买，两段各自给买/等建议
+trip = ["round-trip", "two-one-ways"]
+return_after_days = 45      # 只在没有设 [dates] outbound/return 时用：回程 = 出发 + N 天
 adults = 1
 currency = "USD"
 request_delay_seconds = 1.0 # pause between Google requests; be polite
 
 [dates]
+# 你的行程：5 月回国、8 月回美国。设了 outbound / return，就只扫这两个窗口：
+# 每个去程日期都和每个回程日期配对查往返票，两个窗口的日期也各自查单程。
+outbound = { from = "2027-05-01", to = "2027-05-31", step_days = 4 }
+return = { from = "2027-08-01", to = "2027-08-25", step_days = 6 }
+
+# 没设 outbound / return 时，改用滚动网格：
 # 扫描未来 start_days..end_days 天内的出发日，每 step_days 天一个。
 # 日期锚定在固定日历上，所以每天跑的是同一批出发日，价格曲线能连起来。
 # step_days 不是 7 的倍数，出发日会轮流落在一周的不同天。
@@ -74,6 +82,6 @@ min_days_out = 21     # 离出发不到这么多天就不建议再等
 rule_margin = 0.05    # 规则：比 28 天最低价贵这么多 → 便宜的舱位最近开过，可能再开，等
 
 [alerts]
-# 总价（含定位航段）低于该值时，GitHub Actions 会开一个 issue 提醒你。
-shanghai = 3800
-beijing = 3800
+# 价格（含定位航段）低于这些值时，GitHub Actions 会开一个 issue 提醒你。
+round_trip = 5000   # 一张往返票（你通常 2/3 月能买到的价位）
+one_way = 2800      # 单程（去程或回程）

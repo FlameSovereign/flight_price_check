@@ -52,33 +52,35 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 
 ALERT_STATE = "alerted.csv"
 ALERT_KEY = ["series_key", "depart", "ret"]
+KIND_NAMES = {"rt": "往返票", "out": "去程单程", "back": "回程单程"}
+
+
+def _kind(row) -> str:
+    if row["ret"]:
+        return "rt"
+    return "back" if row["leg"] == "back" else "out"
 
 
 def load_latest_run(data_dir: Path, watchlist: Watchlist) -> tuple[pd.DataFrame, date]:
-    """The latest run's observations for the searches the watchlist asks for now.
+    """The latest run's observations for exactly the searches the watchlist asks for.
 
-    Rows from an older setup (one-way vs round trip, another stay length, a
-    dropped city or strategy) stay in the data for the model but not in the report.
+    Rows from an older setup (other dates, trip type, cities or strategies) stay in
+    the data for the model but not in the report.
     """
     obs = pd.read_csv(Path(data_dir) / "observations.csv", dtype={"ret": str}, keep_default_na=False)
     for col in ("price", "total_price", "position_price", "g_current", "g_low", "g_high", "days_out"):
         obs[col] = pd.to_numeric(obs[col], errors="coerce")
     obs["leg"] = obs["leg"].replace("", "out") if "leg" in obs else "out"
     obs["trip_depart"] = obs["trip_depart"].where(obs["trip_depart"] != "", obs["depart"]) if "trip_depart" in obs else obs["depart"]
-    if watchlist.trip == "round-trip":
-        stay = (pd.to_datetime(obs["ret"].replace("", None)) - pd.to_datetime(obs["depart"])).dt.days
-        current = stay == watchlist.return_after_days
-    elif watchlist.trip == "two-one-ways":
-        stay = (pd.to_datetime(obs["depart"]) - pd.to_datetime(obs["trip_depart"])).dt.days
-        current = (obs["ret"] == "") & ((obs["leg"] == "out") | ((obs["leg"] == "back") & (stay == watchlist.return_after_days)))
-    else:
-        current = (obs["ret"] == "") & (obs["leg"] == "out")
-    current &= obs["strategy"].isin([s.key for s in watchlist.strategies]) & obs["city"].isin(list(watchlist.destinations))
-    obs = obs[current]
-    if obs.empty:
-        raise RuntimeError("no observations match the current watchlist yet; run `flightcheck collect` first")
     run_date = max(obs["run_date"])
-    return obs[obs["run_date"] == run_date].copy(), date.fromisoformat(run_date)
+    wanted = {(j.series_key, j.depart.isoformat(), j.ret.isoformat() if j.ret else "")
+              for j in watchlist.jobs(date.fromisoformat(run_date))}
+    latest = obs[obs["run_date"] == run_date]
+    latest = latest[[k in wanted for k in zip(latest["series_key"], latest["depart"], latest["ret"])]].copy()
+    if latest.empty:
+        raise RuntimeError("the latest run does not match the current watchlist; run `flightcheck collect` first")
+    latest["kind"] = [_kind(r) for _, r in latest.iterrows()]
+    return latest, date.fromisoformat(run_date)
 
 
 def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
@@ -91,8 +93,6 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
         how="left",
     )
     names = {s.key: s.name for s in watchlist.strategies}
-    order = [s.key for s in watchlist.strategies]
-    priced = obs.dropna(subset=["total_price"]).sort_values("total_price")
 
     reports_dir.mkdir(parents=True, exist_ok=True)
     alerts = _alerts(obs, watchlist, names, Path(data_dir) / ALERT_STATE, run_date)
@@ -102,8 +102,7 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     elif alert_path.exists():
         alert_path.unlink()
 
-    render = _render_legs if watchlist.trip == "two-one-ways" else _render
-    md = render(watchlist, run_date, obs, priced, names, order, result.metrics, alerts)
+    md = _render(watchlist, run_date, obs, names, result.metrics, alerts)
     (reports_dir / "latest.md").write_text(md, encoding="utf-8")
     (reports_dir / "model.json").write_text(json.dumps(result.metrics, ensure_ascii=False, indent=2) + "\n")
     return {"run_date": str(run_date), "alerts": bool(alerts), "metrics": result.metrics}
@@ -113,23 +112,29 @@ def _wd(day: str) -> str:
     return "周" + WEEKDAYS[date.fromisoformat(day).weekday()]
 
 
-def _dates(depart: str, ret: str) -> str:
-    out = f"{depart}（{WEEKDAYS[date.fromisoformat(depart).weekday()]}）"
-    if ret:
-        out += f"<br>回 {ret}（{WEEKDAYS[date.fromisoformat(ret).weekday()]}）"
-    return out
+def _day(day: str) -> str:
+    return f"{day}（{_wd(day)}）"
 
 
-def _deal_row(r, names, with_city=True) -> list[str]:
+def _when(r) -> str:
+    if r["kind"] == "rt":
+        return f"{_day(r['depart'])}<br>回 {_day(r['ret'])}"
+    if r["kind"] == "back":
+        paired = r.get("trip_depart") and r["trip_depart"] != r["depart"]
+        return f"回 {_day(r['depart'])}" + (f"<br>去程 {r['trip_depart']}" if paired else "")
+    return _day(r["depart"])
+
+
+def _signal(r) -> str:
+    return r["signal"] if isinstance(r.get("signal"), str) else "—"
+
+
+def _deal_row(r, names) -> list[str]:
     pos_price = r.get("position_price")
     pos = f"<br>含定位 {_money(pos_price)}" if pos_price is not None and pd.notna(pos_price) else ""
-    if r.get("leg") == "back":
-        cells = [f"回 {r['depart']}（{_wd(r['depart'])}）<br>去程 {r['trip_depart']}"]
-    else:
-        cells = [_dates(r["depart"], r["ret"])]
-    if with_city:
-        cells.append(_city(r["city"]))
-    cells += [
+    return [
+        _when(r),
+        _city(r["city"]),
         names.get(r["strategy"], r["strategy"]),
         f"**{_money(r['total_price'])}**{pos}",
         f"{r['route']}<br>{r['airlines']}",
@@ -137,27 +142,81 @@ def _deal_row(r, names, with_city=True) -> list[str]:
         _level(r),
         _money(r.get("hist_min")),
         _pct(r.get("p_drop")),
-        r["signal"] if isinstance(r.get("signal"), str) else "—",
+        _signal(r),
     ]
-    return cells
 
 
-def _deal_headers(watchlist: Watchlist) -> list[str]:
+def _deal_headers(watchlist: Watchlist, kind: str = "out") -> list[str]:
     m = watchlist.model
-    leg = "去程" if watchlist.trip == "round-trip" else ""
-    return ["日期", "城市", "策略", "总价", f"{leg}航线 / 航司", f"{leg}航班", "Google 判断（常见区间）", "历史最低（不含定位）",
+    leg = "去程" if kind == "rt" else ""
+    return ["日期", "城市", "策略", "价格", f"{leg}航线 / 航司", f"{leg}航班", "Google 判断（常见区间）", "历史最低（不含定位）",
             f"P({m.horizon_days}天内降≥{m.drop_threshold:.0%})", "建议"]
 
 
-def _render(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> str:
-    trip = f"往返（停留 {watchlist.return_after_days} 天）" if watchlist.trip == "round-trip" else "单程"
+def _describe_dates(w: Watchlist) -> str:
+    if w.outbound is not None:
+        text = f"去程 {w.outbound.start}–{w.outbound.end}（每 {w.outbound.step} 天）"
+        if w.inbound is not None:
+            text += f"，回程 {w.inbound.start}–{w.inbound.end}（每 {w.inbound.step} 天）"
+        return text
+    text = f"未来 {w.start_days}–{w.end_days} 天出发（每 {w.step_days} 天）"
+    if set(w.trips) & {"round-trip", "two-one-ways"}:
+        text += f"，回程 = 出发后 {w.return_after_days} 天"
+    return text
+
+
+def _describe_trips(w: Watchlist) -> str:
+    names = {"round-trip": "一张往返票", "two-one-ways": "两张单程（去程、回程分开买）", "one-way": "去程单程"}
+    return " + ".join(names[t] for t in w.trips)
+
+
+def _best_legs(legs: pd.DataFrame, city: str, by: str | None):
+    """Cheapest leg per `by` value (or overall when by is None) for a city."""
+    c = legs[legs["city"] == city]
+    if c.empty:
+        return None
+    if by is None:
+        return c.sort_values("total_price").iloc[0]
+    return c.loc[c.groupby(by)["total_price"].idxmin()].set_index(by)
+
+
+def _two_one_ways(watchlist: Watchlist, out: pd.DataFrame, back: pd.DataFrame, city: str):
+    """(outbound row, return row, total) for the cheapest pairing, or None.
+
+    Fixed windows: any outbound date with any return date. Rolling grid: each
+    outbound with the return leg searched for it."""
+    if watchlist.outbound is not None:
+        o, b = _best_legs(out, city, None), _best_legs(back, city, None)
+        if o is None or b is None:
+            return None
+        return o, b, o["total_price"] + b["total_price"]
+    o, b = _best_legs(out, city, "trip_depart"), _best_legs(back, city, "trip_depart")
+    if o is None or b is None:
+        return None
+    both = o.index.intersection(b.index)
+    if both.empty:
+        return None
+    totals = o.loc[both, "total_price"] + b.loc[both, "total_price"]
+    k = totals.idxmin()
+    return o.loc[k], b.loc[k], totals[k]
+
+
+def _leg_line(r, names) -> str:
+    return (f"{_money(r['total_price'])} · {_when(r).replace('<br>', ' ')} · {names.get(r['strategy'], r['strategy'])} · "
+            f"{r['route']}（{r['airlines']}）· 建议：{_signal(r)}")
+
+
+def _render(watchlist, run_date, obs, names, metrics, alerts) -> str:
+    order = [s.key for s in watchlist.strategies]
+    priced = obs.dropna(subset=["total_price"]).sort_values("total_price")
+    rt, out, back = (priced[priced["kind"] == k] for k in ("rt", "out", "back"))
     lines = [
         f"# 回国{_cabin(watchlist.cabin)}价格监控 · {run_date}",
         "",
-        f"> 数据：Google Flights · {trip} · {watchlist.adults} 成人 · {watchlist.currency} · "
-        f"今天共 {len(obs)} 次搜索，{obs['total_price'].notna().sum()} 次有结果。"
-        "总价 = 主航段 + 定位航段（如有：提前一天、分开出票的经济舱，不含酒店；查不到定位航段时不给总价）。"
-        + ("往返时价格是整张往返票，表里的航线和航班是去程，回程在 Google Flights 上再选。" if watchlist.trip == "round-trip" else ""),
+        f"> Google Flights · {_describe_trips(watchlist)} · {_describe_dates(watchlist)} · {watchlist.adults} 成人 · "
+        f"{watchlist.currency}。今天共 {len(obs)} 次搜索，{obs['total_price'].notna().sum()} 次有价格。"
+        "价格含定位航段（如有：去程提前一天飞到出发机场，回程当天飞回；分开出票的经济舱，不含酒店；查不到定位航段时不给价格）。"
+        + ("往返票的航线和航班是去程，回程在 Google Flights 上再选。" if "round-trip" in watchlist.trips else ""),
         "",
     ]
     if alerts:
@@ -165,137 +224,120 @@ def _render(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> 
 
     lines += ["## 今日速览", ""]
     for city in watchlist.destinations:
-        c = priced[priced["city"] == city]
-        if c.empty:
-            continue
-        best = c.iloc[0]
-        lines.append(
-            f"- **{_city(city)}** 最低 {_money(best['total_price'])}：{best['depart']} · "
-            f"{names.get(best['strategy'], best['strategy'])} · {best['route']}（{best['airlines']}）"
-        )
+        lines.append(f"- **{_city(city)}**")
+        best_rt = _best_legs(rt, city, None)
+        pair = _two_one_ways(watchlist, out, back, city) if "two-one-ways" in watchlist.trips else None
+        if "round-trip" in watchlist.trips:
+            if best_rt is None:
+                lines.append("  - 往返票：Google 上还没有这些日期组合的往返票价（便宜的往返票往往要等航司放出夏季运价）")
+            else:
+                lines.append(f"  - 往返票最低 **{_leg_line(best_rt, names)}**")
+        if pair is not None:
+            o, b, total = pair
+            lines += [f"  - 两张单程最低合计 **{_money(total)}**",
+                      f"    - 去程 {_leg_line(o, names)}",
+                      f"    - 回程 {_leg_line(b, names)}"]
+        elif "one-way" in watchlist.trips or "two-one-ways" in watchlist.trips:
+            o = _best_legs(out, city, None)
+            if o is not None:
+                lines.append(f"  - 去程单程最低 {_leg_line(o, names)}")
+        if best_rt is not None and pair is not None:
+            cheaper = "往返票" if best_rt["total_price"] <= pair[2] else "两张单程"
+            lines.append(f"  - 现在更便宜的买法：**{cheaper}**（差 {_money(abs(best_rt['total_price'] - pair[2]))}）")
     lines.append("")
 
-    summary_rows = []
-    for key in order:
-        cells = [names.get(key, key)]
+    kinds = [k for k in ("rt", "out", "back") if not priced[priced["kind"] == k].empty]
+    if kinds:
+        summary_rows = []
+        for key in order:
+            cells = [names.get(key, key)]
+            for city in watchlist.destinations:
+                for k in kinds:
+                    c = priced[(priced["kind"] == k) & (priced["strategy"] == key) & (priced["city"] == city)]["total_price"]
+                    cells.append(f"{_money(c.min())}（{_money(c.median())}）" if len(c) else "—")
+            summary_rows.append(cells)
+        headers = ["策略"] + [f"{_city(c)} {KIND_NAMES[k]}" for c in watchlist.destinations for k in kinds]
+        lines += ["### 策略对比：最低（中位数）", "", _table(headers, summary_rows), ""]
+
+    if "round-trip" in watchlist.trips:
+        lines += ["## 往返票", ""]
         for city in watchlist.destinations:
-            c = priced[(priced["strategy"] == key) & (priced["city"] == city)]["total_price"]
-            cells += [_money(c.min()) if len(c) else "—", _money(c.median()) if len(c) else "—"]
-        summary_rows.append(cells)
-    headers = ["策略"] + [f"{_city(c)} {k}" for c in watchlist.destinations for k in ("最低", "中位数")]
-    lines += ["### 策略对比（所有扫描日期）", "", _table(headers, summary_rows), ""]
+            c = obs[(obs["city"] == city) & (obs["kind"] == "rt")]
+            if c.empty:
+                continue
+            lines += [f"### {_city(city)}", ""]
+            if watchlist.outbound is not None:
+                lines += ["各策略里最便宜的往返票：行 = 去程日期，列 = 回程日期，“—” = 还没有票价。最低价加粗。", "", _rt_matrix(c), ""]
+            else:
+                lines += [_strategy_pivot(c, names, order), ""]
 
-    lines += [f"## 最便宜的 {TOP_N} 个组合", "", _table(_deal_headers(watchlist), [_deal_row(r, names) for _, r in priced.head(TOP_N).iterrows()]), ""]
+    if "two-one-ways" in watchlist.trips and watchlist.outbound is None:
+        lines += _paired_legs(watchlist, out, back, names)
+    for kind in ("out", "back"):
+        legs = obs[obs["kind"] == kind]
+        if legs.empty:
+            continue
+        lines += [f"## {KIND_NAMES[kind]}：按日期对比策略", "", "每行最低价加粗。“—” = 那天这种走法没搜到航班。", ""]
+        for city in watchlist.destinations:
+            c = legs[legs["city"] == city]
+            if not c.empty:
+                lines += [f"### {_city(city)}", "", _strategy_pivot(c, names, order), ""]
 
-    lines += ["## 按出发日期对比策略（总价）", "", "每行最低价加粗。“—” = 当天该策略没搜到航班。", ""]
-    for city in watchlist.destinations:
-        c = obs[obs["city"] == city]
-        if not c.empty:
-            lines += [f"### {_city(city)}", "", _strategy_pivot(c, names, order), ""]
+    for kind, rows in (("rt", rt), ("out", out), ("back", back)):
+        if not rows.empty:
+            lines += [f"## 最便宜的 {TOP_N} 张{KIND_NAMES[kind]}", "",
+                      _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for _, r in rows.head(TOP_N).iterrows()]), ""]
 
     lines += _model_section(metrics, watchlist)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _rt_matrix(rt: pd.DataFrame) -> str:
+    best = rt.groupby(["depart", "ret"])["total_price"].min()
+    outs, rets = sorted(rt["depart"].unique()), sorted(rt["ret"].unique())
+    cheapest = best.min()
+    rows = []
+    for o in outs:
+        cells = [_day(o)]
+        for r in rets:
+            v = best.get((o, r), np.nan)
+            cells.append(f"**{_money(v)}**" if pd.notna(v) and v == cheapest else _money(v))
+        rows.append(cells)
+    return _table(["去程 \\ 回程"] + [_day(r) for r in rets], rows)
 
 
 def _strategy_pivot(obs: pd.DataFrame, names: dict, order: list[str]) -> str:
     pivot = obs.pivot_table(index=["depart", "ret"], columns="strategy", values="total_price", aggfunc="min")
+    pivot = pivot.reindex(sorted({(d, r) for d, r in zip(obs["depart"], obs["ret"])}))
     rows = []
     for (depart, ret), prices in pivot.iterrows():
         best = prices.min()
-        cells = [_dates(depart, ret)]
+        cells = [_day(depart) + (f"<br>回 {_day(ret)}" if ret else "")]
         for key in order:
             v = prices.get(key, np.nan)
-            cells.append(f"**{_money(v)}**" if v == best else _money(v))
+            cells.append(f"**{_money(v)}**" if pd.notna(v) and v == best else _money(v))
         rows.append(cells)
     return _table(["日期"] + [names.get(k, k) for k in order], rows)
 
 
-def _render_legs(watchlist, run_date, obs, priced, names, order, metrics, alerts) -> str:
-    """Report for trip = two-one-ways: an outbound one-way and a separate return one-way."""
-    stay = watchlist.return_after_days
-    out, back = priced[priced["leg"] == "out"], priced[priced["leg"] == "back"]
-    lines = [
-        f"# 回国{_cabin(watchlist.cabin)}价格监控 · {run_date}",
-        "",
-        f"> 数据：Google Flights · 两张单程（去程 + {stay} 天后回程，分开买）· {watchlist.adults} 成人 · {watchlist.currency} · "
-        f"今天共 {len(obs)} 次搜索，{obs['total_price'].notna().sum()} 次有结果。"
-        "停留超过约 1 个月时，打折的商务舱往返票基本不卖，两张单程通常便宜得多。"
-        "价格含定位航段（如有：去程提前一天飞到出发机场，回程当天飞回；分开出票的经济舱，不含酒店）。"
-        "每段各自给“买 / 等”建议，可以分开下单。",
-        "",
-    ]
-    if alerts:
-        lines += ["## 🔔 价格提醒", "", alerts.split("\n", 2)[2].strip(), ""]
-
-    # Cheapest leg per trip and direction, across strategies.
-    def best_by_trip(legs: pd.DataFrame) -> pd.DataFrame:
-        idx = legs.groupby(["city", "trip_depart"])["total_price"].idxmin()
-        return legs.loc[idx].set_index(["city", "trip_depart"])
-
-    best_out, best_back = best_by_trip(out), best_by_trip(back)
-    trips = best_out.join(best_back, lsuffix="_out", rsuffix="_back", how="inner")
-    trips["trip_total"] = trips["total_price_out"] + trips["total_price_back"]
-
-    def leg_text(r, sfx: str) -> str:
-        return (f"{_money(r['total_price' + sfx])} · {names.get(r['strategy' + sfx], r['strategy' + sfx])} · "
-                f"{r['route' + sfx]}（{r['airlines' + sfx]}）· 建议：{r['signal' + sfx] if isinstance(r['signal' + sfx], str) else '—'}")
-
-    lines += ["## 今日速览", ""]
+def _paired_legs(watchlist: Watchlist, out: pd.DataFrame, back: pd.DataFrame, names: dict) -> list[str]:
+    """Rolling grid with two-one-ways: each outbound date with its own return leg."""
+    lines = ["## 按日期：两张单程合计", "", "每段取当天所有策略里最便宜的那张；合计最低的一行加粗。", ""]
     for city in watchlist.destinations:
-        if city not in trips.index.get_level_values(0):
+        o, b = _best_legs(out, city, "trip_depart"), _best_legs(back, city, "trip_depart")
+        if o is None or b is None:
             continue
-        t = trips.loc[city].sort_values("trip_total").iloc[0]
-        lines += [
-            f"- **{_city(city)}** 最便宜的一趟：去 {t.name}（{_wd(t.name)}）→ 回 {t['depart_back']}（{_wd(t['depart_back'])}），"
-            f"合计 **{_money(t['trip_total'])}**",
-            f"  - 去程 {leg_text(t, '_out')}",
-            f"  - 回程 {leg_text(t, '_back')}",
-        ]
-    lines.append("")
-
-    summary_rows = []
-    for key in order:
-        cells = [names.get(key, key)]
-        for city in watchlist.destinations:
-            for legs in (out, back):
-                c = legs[(legs["strategy"] == key) & (legs["city"] == city)]["total_price"]
-                cells.append(f"{_money(c.min())}（{_money(c.median())}）" if len(c) else "—")
-        summary_rows.append(cells)
-    headers = ["策略"] + [f"{_city(c)} {leg}" for c in watchlist.destinations for leg in ("去程", "回程")]
-    lines += ["### 策略对比：最低（中位数），所有扫描日期", "", _table(headers, summary_rows), ""]
-
-    lines += ["## 按日期：两张单程合计", "", "每段取当天所有策略里最便宜的那张；合计最低的一行加粗。", ""]
-    for city in watchlist.destinations:
-        if city not in trips.index.get_level_values(0):
-            continue
-        t = trips.loc[city].sort_index()
-        cheapest = t["trip_total"].min()
+        both = o.index.intersection(b.index).sort_values()
+        totals = o.loc[both, "total_price"] + b.loc[both, "total_price"]
         rows = []
-        for depart, r in t.iterrows():
-            total = f"**{_money(r['trip_total'])}**" if r["trip_total"] == cheapest else _money(r["trip_total"])
-            rows.append([
-                f"{depart}（{_wd(depart)}）",
-                f"{r['depart_back']}（{_wd(r['depart_back'])}）",
-                f"{_money(r['total_price_out'])} {names.get(r['strategy_out'], '')}",
-                f"{_money(r['total_price_back'])} {names.get(r['strategy_back'], '')}",
-                total,
-            ])
+        for k in both:
+            total = _money(totals[k])
+            rows.append([_day(k), _day(b.loc[k, "depart"]),
+                         f"{_money(o.loc[k, 'total_price'])} {names.get(o.loc[k, 'strategy'], '')}",
+                         f"{_money(b.loc[k, 'total_price'])} {names.get(b.loc[k, 'strategy'], '')}",
+                         f"**{total}**" if totals[k] == totals.min() else total])
         lines += [f"### {_city(city)}", "", _table(["去程", "回程", "去程最低", "回程最低", "合计"], rows), ""]
-
-    headers = _deal_headers(watchlist)
-    lines += [f"## 最便宜的 {TOP_N} 张去程", "", _table(headers, [_deal_row(r, names) for _, r in out.head(TOP_N).iterrows()]), ""]
-    lines += [f"## 最便宜的 {TOP_N} 张回程", "", _table(headers, [_deal_row(r, names) for _, r in back.head(TOP_N).iterrows()]), ""]
-
-    for leg, title in (("out", "去程"), ("back", "回程")):
-        lines += [f"<details><summary>各策略按日期对比（{title}）</summary>", ""]
-        for city in watchlist.destinations:
-            c = obs[(obs["city"] == city) & (obs["leg"] == leg)]
-            if not c.empty:
-                lines += [f"#### {_city(city)}", "", _strategy_pivot(c, names, order), ""]
-        lines += ["</details>", ""]
-
-    lines += _model_section(metrics, watchlist)
-    return "\n".join(lines).rstrip() + "\n"
+    return lines
 
 
 def _cabin(cabin: str) -> str:
@@ -363,10 +405,11 @@ def _model_section(m: dict, watchlist: Watchlist) -> list[str]:
 
 
 def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Path, run_date: date) -> str:
-    """Combos under their city's alert price that were never alerted, or are cheaper than when last alerted.
+    """Tickets under their alert price that were never alerted, or are cheaper than when last alerted.
 
+    [alerts] round_trip applies to round-trip tickets, one_way to single legs.
     The alerted prices live in a state file, so a partial run, a failed search or a
-    same-day rerun cannot make old alerts look new. A combo that climbs back above
+    same-day rerun cannot make old alerts look new. A ticket that climbs back above
     the limit is forgotten, so its next drop under the limit alerts again.
     """
     state: dict[tuple, float] = {}
@@ -375,7 +418,7 @@ def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Pa
         state = {tuple(r[k] for k in ALERT_KEY): float(r["total_price"]) for _, r in old.iterrows()}
     hits = []
     for _, r in obs.sort_values("total_price").iterrows():
-        limit = watchlist.alerts.get(r["city"])
+        limit = watchlist.alerts.get("round_trip" if r["kind"] == "rt" else "one_way")
         total = r["total_price"]
         if limit is None or pd.isna(total):
             continue  # no alert configured, or no price today: keep what we knew
@@ -392,6 +435,11 @@ def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Pa
     pd.DataFrame(rows, columns=ALERT_KEY + ["total_price"]).to_csv(state_path, index=False)
     if not hits:
         return ""
-    limits = "，".join(f"{_city(c)} ≤ {_money(v)}" for c, v in watchlist.alerts.items())
-    table = _table(_deal_headers(watchlist), [_deal_row(r, names) for r in hits])
-    return f"# 价格提醒\n\n{len(hits)} 个组合新跌破提醒价，或比上次提醒时更便宜（{limits}）：\n\n" + table + "\n"
+    labels = {"round_trip": "往返票", "one_way": "单程"}
+    limits = "，".join(f"{labels.get(k, k)} ≤ {_money(v)}" for k, v in watchlist.alerts.items())
+    sections = []
+    for kind in ("rt", "out", "back"):
+        rows_k = [r for r in hits if r["kind"] == kind]
+        if rows_k:
+            sections += [f"### {KIND_NAMES[kind]}", "", _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for r in rows_k]), ""]
+    return f"# 价格提醒\n\n{len(hits)} 张票新跌破提醒价，或比上次提醒时更便宜（{limits}）：\n\n" + "\n".join(sections).rstrip() + "\n"
