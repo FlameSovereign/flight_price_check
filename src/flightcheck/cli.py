@@ -13,14 +13,20 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="flightcheck", description=__doc__)
     parser.add_argument("--config", default="config/watchlist.toml")
     parser.add_argument("--data", default="data")
+    parser.add_argument("--reports", default="reports")
+    # The same options are accepted after the subcommand too. They have no
+    # default there, so they never overwrite a value given before it.
+    common = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
+    common.add_argument("--config")
+    common.add_argument("--data")
+    common.add_argument("--reports")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_collect = sub.add_parser("collect", help="run all searches and append to data/")
-    p_collect.add_argument("--limit", type=int, help="only run the first N searches")
-    p_collect.add_argument("--only", nargs="*", help="only these strategy keys or cities")
-    p_collect.add_argument("--today", type=date.fromisoformat, help="pretend today is this date")
-    sub.add_parser("report", help="train the model and write reports/latest.md")
-    p_run = sub.add_parser("run", help="collect, then report")
-    p_run.add_argument("--limit", type=int)
+    for name, help_text in (("collect", "run all searches and append to data/"), ("run", "collect, then report")):
+        p = sub.add_parser(name, help=help_text, parents=[common])
+        p.add_argument("--limit", type=int, help="only run the first N searches")
+        p.add_argument("--only", nargs="*", help="only these strategy keys or cities")
+        p.add_argument("--today", type=date.fromisoformat, help="pretend today is this date")
+    sub.add_parser("report", help="train the model and write reports/latest.md", parents=[common])
     p_search = sub.add_parser("search", help="one ad-hoc search, printed to the terminal")
     p_search.add_argument("origin", help="e.g. ATL or ATL,IAH")
     p_search.add_argument("destination", help="e.g. PVG,SHA")
@@ -29,7 +35,6 @@ def main(argv: list[str] | None = None) -> None:
     p_search.add_argument("--airlines", default="")
     p_search.add_argument("--connecting", default="")
     p_search.add_argument("--return-date", type=date.fromisoformat)
-    parser.add_argument("--reports", default="reports")
     args = parser.parse_args(argv)
 
     if args.cmd == "search":
@@ -38,14 +43,10 @@ def main(argv: list[str] | None = None) -> None:
 
     watchlist = config.load(args.config)
     data_dir = Path(args.data)
-    if args.cmd == "collect":
+    if args.cmd in ("collect", "run"):
         from .collect import collect
 
         collect(watchlist, data_dir, today=args.today, limit=args.limit, only=set(args.only or []))
-    elif args.cmd == "run":
-        from .collect import collect
-
-        collect(watchlist, data_dir, limit=args.limit)
     if args.cmd in ("report", "run"):
         from .report import build
 

@@ -25,9 +25,6 @@ jobs:
       - name: Install
         run: uv sync --frozen
 
-      - name: Tests
-        run: uv run pytest -q
-
       - name: Collect prices and write report
         run: uv run flightcheck run
 

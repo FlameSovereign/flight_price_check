@@ -50,19 +50,20 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
-def load_runs(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, date]:
-    """Observations of the latest run, those of the run before it, and the run date."""
+ALERT_STATE = "alerted.csv"
+ALERT_KEY = ["series_key", "depart", "ret"]
+
+
+def load_latest_run(data_dir: Path) -> tuple[pd.DataFrame, date]:
     obs = pd.read_csv(Path(data_dir) / "observations.csv", dtype={"ret": str}, keep_default_na=False)
     for col in ("price", "total_price", "position_price", "g_current", "g_low", "g_high", "days_out"):
         obs[col] = pd.to_numeric(obs[col], errors="coerce")
-    runs = sorted(obs["run_date"].unique())
-    latest = obs[obs["run_date"] == runs[-1]].copy()
-    previous = obs[obs["run_date"] == runs[-2]].copy() if len(runs) > 1 else obs.iloc[0:0]
-    return latest, previous, date.fromisoformat(runs[-1])
+    run_date = max(obs["run_date"])
+    return obs[obs["run_date"] == run_date].copy(), date.fromisoformat(run_date)
 
 
 def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
-    obs, previous, run_date = load_runs(data_dir)
+    obs, run_date = load_latest_run(data_dir)
     result = model.train(model.load_history(data_dir), watchlist.model)
     signals = model.latest_signals(result, watchlist.model)
     obs = obs.merge(
@@ -75,7 +76,7 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     priced = obs.dropna(subset=["total_price"]).sort_values("total_price")
 
     reports_dir.mkdir(parents=True, exist_ok=True)
-    alerts = _alerts(priced, previous, watchlist, names)
+    alerts = _alerts(obs, watchlist, names, Path(data_dir) / ALERT_STATE, run_date)
     alert_path = reports_dir / "alerts.md"
     if alerts:
         alert_path.write_text(alerts, encoding="utf-8")
@@ -236,17 +237,36 @@ def _model_section(m: dict, watchlist: Watchlist) -> list[str]:
     return lines
 
 
-def _alerts(priced: pd.DataFrame, previous: pd.DataFrame, watchlist: Watchlist, names: dict) -> str:
-    """Combos under the alert price that are new or cheaper than in the previous run."""
-    before = previous.set_index(["series_key", "depart", "ret"])["total_price"].to_dict()
+def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Path, run_date: date) -> str:
+    """Combos under their city's alert price that were never alerted, or are cheaper than when last alerted.
+
+    The alerted prices live in a state file, so a partial run, a failed search or a
+    same-day rerun cannot make old alerts look new. A combo that climbs back above
+    the limit is forgotten, so its next drop under the limit alerts again.
+    """
+    state: dict[tuple, float] = {}
+    if state_path.exists():
+        old = pd.read_csv(state_path, dtype=str, keep_default_na=False)
+        state = {tuple(r[k] for k in ALERT_KEY): float(r["total_price"]) for _, r in old.iterrows()}
     hits = []
-    for city, limit in watchlist.alerts.items():
-        for _, r in priced[(priced["city"] == city) & (priced["total_price"] <= limit)].iterrows():
-            last = before.get((r["series_key"], r["depart"], r["ret"]))
-            if last is None or pd.isna(last) or last > limit or r["total_price"] < last:
+    for _, r in obs.sort_values("total_price").iterrows():
+        limit = watchlist.alerts.get(r["city"])
+        total = r["total_price"]
+        if limit is None or pd.isna(total):
+            continue  # no alert configured, or no price today: keep what we knew
+        key = tuple(str(r[k]) for k in ALERT_KEY)
+        if total <= limit:
+            if key not in state or total < state[key]:
                 hits.append(r)
+                state[key] = float(total)
+        else:
+            state.pop(key, None)
+    today = run_date.isoformat()
+    rows = [dict(zip(ALERT_KEY, k), total_price=int(v)) for k, v in sorted(state.items()) if k[1] >= today]
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=ALERT_KEY + ["total_price"]).to_csv(state_path, index=False)
     if not hits:
         return ""
-    rows = [_deal_row(r, names) for r in sorted(hits, key=lambda r: r["total_price"])]
     limits = "，".join(f"{_city(c)} ≤ {_money(v)}" for c, v in watchlist.alerts.items())
-    return f"# 价格提醒\n\n{len(hits)} 个组合新跌破提醒价（{limits}）：\n\n" + _table(_deal_headers(watchlist), rows) + "\n"
+    table = _table(_deal_headers(watchlist), [_deal_row(r, names) for r in hits])
+    return f"# 价格提醒\n\n{len(hits)} 个组合新跌破提醒价，或比上次提醒时更便宜（{limits}）：\n\n" + table + "\n"

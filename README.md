@@ -17,7 +17,7 @@ Google Flights 每次搜索的页面里，除了航班列表，还藏着两样�
 
 ## 监控什么
 
-全在 [`config/watchlist.toml`](config/watchlist.toml) 里，改完就生效：
+全在 [`config/watchlist.toml`](config/watchlist.toml) 里，改完就生效（测试用的是 `tests/fixtures/` 里的冻结副本，随便改不会让每日任务挂掉）：
 
 | 策略 | 怎么搜 | 有 60 天历史？ |
 |---|---|---|
@@ -47,10 +47,13 @@ uv run pytest
 
 [`.github/workflows/daily.yml`](.github/workflows/daily.yml) 每天亚特兰大时间早上 7 点左右跑一次：
 采集 → 训练 → 生成报告 → 把 `data/` 和 `reports/` 提交回仓库。
-某个城市的总价新跌破 `[alerts]` 里设的提醒价时，会自动开一个 GitHub issue（GitHub 会发邮件/推送给你）。
+某个组合的总价跌破 `[alerts]` 里设的提醒价（或比上次提醒时更便宜）时，会自动开一个 GitHub issue（GitHub 会发邮件/推送给你）。
+已经提醒过的价格记在 `data/alerted.csv`，不会因为某天抓取不完整或重跑而重复提醒。
 也可以在 Actions 页面手动点 “Run workflow”。
 
 一次大约 350–400 个请求、10–15 分钟。
+
+定时任务只在仓库的**默认分支**上跑。先合并 PR，再把默认分支切到 `main`；顺序反过来的话，`main` 上还没有 workflow 文件，定时任务会悄悄停掉。
 
 ## 数据文件
 
@@ -60,7 +63,8 @@ uv run pytest
 | `data/history.csv` | 每条（策略:城市, 出发日）的每日最低价序列，模型的训练数据 |
 | `data/itineraries/<日期>.csv.gz` | 每个搜索最便宜的 5 个行程 |
 | `reports/latest.md` | 每日报告 |
-| `reports/model.json` | 模型验证指标 |
+| `reports/model.json` | 模型验证指标（逐周回放结果、当前跟随的策略） |
+| `data/alerted.csv` | 已经提醒过的组合和价格 |
 
 ## 模型
 

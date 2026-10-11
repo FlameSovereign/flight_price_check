@@ -86,7 +86,8 @@ def build_panel(history: pd.DataFrame) -> pd.DataFrame:
         frame["seg"] = (frame["obs_date"].diff().dt.days.fillna(1) > 1).cumsum()
         frames.append(frame)
     if not frames:
-        return pd.DataFrame(columns=GROUP + ["obs_date", "price", "days_out"])
+        empty = pd.DataFrame(columns=GROUP + ["obs_date", "price", "days_out"])
+        return empty.astype({"depart": "datetime64[ns]", "obs_date": "datetime64[ns]", "price": float})
     panel = pd.concat(frames, ignore_index=True)
     panel["days_out"] = (panel["depart"] - panel["obs_date"]).dt.days
     panel = panel[panel["days_out"] >= 0]
@@ -206,7 +207,11 @@ class TrainResult:
 
 
 def train(history: pd.DataFrame, s: ModelSettings) -> TrainResult:
-    panel = add_targets(add_features(build_panel(history)), s.horizon_days, s.drop_threshold)
+    panel = build_panel(history)
+    if panel.empty:
+        panel = panel.assign(hist_len=pd.Series(dtype=int), min28=pd.Series(dtype=float), p_drop=pd.Series(dtype=float))
+        return TrainResult(None, panel, {"samples": 0, "series": 0, "status": "no price history yet", "policy": "buy-now"})
+    panel = add_targets(add_features(panel), s.horizon_days, s.drop_threshold)
     usable = panel["hist_len"] >= MIN_HISTORY
     labeled = panel[usable & panel["y"].notna()]
     metrics: dict = {
@@ -342,6 +347,9 @@ def _first_buy(window: pd.Series, wait: pd.Series) -> float:
 def latest_signals(result: TrainResult, s: ModelSettings) -> pd.DataFrame:
     """One row per series: today's price, its context and the recommendation."""
     panel = result.panel
+    if panel.empty:
+        return pd.DataFrame(columns=SERIES + ["obs_date", "price", "days_out", "hist_len", "hist_min", "hist_max",
+                                              "hist_median", "min28", "p_drop", "signal"])
     idx = panel.groupby(SERIES, sort=False)["obs_date"].idxmax()  # latest segment
     latest = panel.loc[idx].copy()
     stats = panel.groupby(SERIES, sort=False)["price"].agg(hist_min="min", hist_max="max", hist_median="median")

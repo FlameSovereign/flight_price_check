@@ -7,18 +7,18 @@ import pandas as pd
 from flightcheck import collect, config, google, model
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "watchlist.toml"
 
 
-def test_default_watchlist_loads():
+def test_real_watchlist_loads_and_expands():
     wl = config.load(ROOT / "config" / "watchlist.toml")
-    assert wl.cabin == "business"
-    assert {s.key for s in wl.strategies} >= {"atl-any", "atl-tk"}
     jobs = wl.jobs(date(2026, 10, 11))
+    assert jobs
     assert len(jobs) == len(wl.departure_dates(date(2026, 10, 11))) * len(wl.strategies) * len(wl.destinations)
 
 
 def test_departure_dates_are_stable_across_days():
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     a = set(wl.departure_dates(date(2026, 10, 11)))
     b = set(wl.departure_dates(date(2026, 10, 12)))
     # Moving one day forward drops at most one date at the front and adds at most one at the end.
@@ -27,7 +27,7 @@ def test_departure_dates_are_stable_across_days():
 
 
 def test_windows_add_every_day():
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.windows = [(date(2027, 1, 28), date(2027, 2, 3))]
     dates = wl.departure_dates(date(2026, 10, 11))
     assert all(date(2027, 1, 28) + timedelta(days=i) in dates for i in range(7))
@@ -50,7 +50,7 @@ def _fake_fetch(search):
 
 
 def test_collect_writes_data_and_applies_filters(tmp_path):
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.request_delay = 0
     obs = collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=8, fetch=_fake_fetch, log=lambda *_: None)
     assert len(obs) == 8
@@ -113,7 +113,7 @@ def test_train_learns_mean_reversion_and_backtests():
 def test_report_renders_and_alerts_only_on_new_lows(tmp_path):
     from flightcheck import report
 
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.request_delay = 0
     wl.alerts = {"shanghai": 99999}
     data, reports = tmp_path / "data", tmp_path / "reports"
@@ -130,7 +130,7 @@ def test_report_renders_and_alerts_only_on_new_lows(tmp_path):
 
 
 def test_one_unexpected_error_does_not_lose_the_run(tmp_path):
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.request_delay = 0
     calls = []
 
@@ -146,7 +146,7 @@ def test_one_unexpected_error_does_not_lose_the_run(tmp_path):
 
 
 def test_missing_positioning_leaves_total_empty(tmp_path):
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.request_delay = 0
 
     def no_positioning(search):
@@ -160,13 +160,13 @@ def test_missing_positioning_leaves_total_empty(tmp_path):
 
 
 def test_positioning_flies_the_day_before():
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     job = next(j for j in wl.jobs(date(2026, 10, 11)) if j.positioning is not None)
     assert job.positioning.slices[0].date == job.depart - timedelta(days=1)
 
 
 def test_same_day_rerun_merges_itineraries(tmp_path):
-    wl = config.load(ROOT / "config" / "watchlist.toml")
+    wl = config.load(FIXTURE)
     wl.request_delay = 0
     today = date(2026, 10, 11)
     collect.collect(wl, tmp_path, today=today, limit=8, fetch=_fake_fetch, log=lambda *_: None)
@@ -210,3 +210,43 @@ def test_train_survives_features_that_are_all_missing():
     result = model.train(_synthetic_history(n_series=30, days=20), settings)
     assert result.metrics["status"] == "ok"
     assert result.metrics["policy"] in model.POLICIES
+
+
+def test_cli_accepts_shared_options_before_or_after_the_subcommand(tmp_path, monkeypatch):
+    from flightcheck import cli
+
+    seen = {}
+    monkeypatch.setattr("flightcheck.report.build", lambda wl, data, reports: seen.update(data=data, reports=reports) or {"metrics": {}})
+    cli.main(["--config", str(FIXTURE), "report", "--data", str(tmp_path / "d"), "--reports", str(tmp_path / "r")])
+    assert seen == {"data": tmp_path / "d", "reports": tmp_path / "r"}
+    cli.main(["--config", str(FIXTURE), "--data", str(tmp_path / "d2"), "report"])
+    assert seen["data"] == tmp_path / "d2"
+
+
+def test_alerts_survive_partial_runs_and_reruns(tmp_path):
+    from flightcheck import report
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    wl.alerts = {"shanghai": 99999}
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    run = lambda day, **kw: collect.collect(wl, data, today=day, fetch=_fake_fetch, log=lambda *_: None, **kw)  # noqa: E731
+    run(date(2026, 10, 10), limit=16)
+    assert report.build(wl, data, reports)["alerts"]
+    assert not report.build(wl, data, reports)["alerts"]  # same-day rerun of the report
+    run(date(2026, 10, 11), limit=2)  # partial run: most combos missing today
+    assert not report.build(wl, data, reports)["alerts"]
+    run(date(2026, 10, 12), limit=16)  # full run, unchanged prices
+    assert not report.build(wl, data, reports)["alerts"]
+
+
+def test_report_without_any_history(tmp_path):
+    from flightcheck import report
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    nothing = lambda search: google.Result([], None)  # noqa: E731
+    collect.collect(wl, tmp_path / "data", today=date(2026, 10, 11), limit=4, fetch=nothing, log=lambda *_: None)
+    assert not (tmp_path / "data" / "history.csv").exists()
+    info = report.build(wl, tmp_path / "data", tmp_path / "reports")
+    assert info["metrics"]["status"] == "no price history yet"
