@@ -12,6 +12,12 @@ from .tfs import Search, Slice
 # Departure dates are multiples of `step_days` from this fixed day, so the
 # same dates come back on every run and each one builds a continuous series.
 DATE_ANCHOR = date(2024, 1, 1)
+# one-way:      outbound only
+# round-trip:   one round-trip ticket, return = departure + return_after_days
+# two-one-ways: an outbound one-way plus a separate return one-way on
+#               departure + return_after_days (cheaper for stays over a month,
+#               where discounted round-trip business fares are not sold)
+TRIP_MODES = ("one-way", "round-trip", "two-one-ways")
 
 
 @dataclass(frozen=True)
@@ -41,14 +47,17 @@ class Job:
 
     strategy: Strategy
     city: str
-    depart: date
-    ret: date | None
+    depart: date  # the date this search flies (the return date for a return leg)
+    ret: date | None  # round-trip tickets only
     search: Search
     positioning: Search | None
+    leg: str = "out"  # "out" (to the destination) or "back" (a separate return one-way)
+    trip_depart: date | None = None  # outbound date of the trip this leg belongs to
 
     @property
     def series_key(self) -> str:
-        return f"{self.strategy.key}:{self.city}"
+        key = f"{self.strategy.key}:{self.city}"
+        return key + ":back" if self.leg == "back" else key
 
 
 @dataclass
@@ -85,12 +94,15 @@ class Watchlist:
         return sorted(dates)
 
     def jobs(self, today: date) -> list[Job]:
+        stay = timedelta(days=self.return_after_days)
         out = []
         for depart in self.departure_dates(today):
-            ret = depart + timedelta(days=self.return_after_days) if self.trip == "round-trip" else None
+            ret = depart + stay if self.trip == "round-trip" else None
             for strategy in self.strategies:
                 for city, airports in self.destinations.items():
                     out.append(self._job(strategy, city, airports, depart, ret))
+                    if self.trip == "two-one-ways":
+                        out.append(self._return_job(strategy, city, airports, depart + stay, depart))
         return out
 
     def _job(self, strategy: Strategy, city: str, airports, depart: date, ret: date | None) -> Job:
@@ -99,7 +111,7 @@ class Watchlist:
         ]
         if ret is not None:
             slices.append(Slice(ret, airports, strategy.origin, strategy.airlines, strategy.connecting))
-        common = dict(trip=self.trip, adults=self.adults, currency=self.currency)
+        common = dict(trip="round-trip" if ret else "one-way", adults=self.adults, currency=self.currency)
         search = Search(tuple(slices), cabin=self.cabin, **common)
         positioning = None
         if strategy.position_from:
@@ -107,7 +119,16 @@ class Watchlist:
             if ret is not None:
                 pos.append(Slice(ret, strategy.origin, strategy.position_from))
             positioning = Search(tuple(pos), cabin="economy", **common)
-        return Job(strategy, city, depart, ret, search, positioning)
+        return Job(strategy, city, depart, ret, search, positioning, trip_depart=depart)
+
+    def _return_job(self, strategy: Strategy, city: str, airports, day: date, trip_depart: date) -> Job:
+        common = dict(trip="one-way", adults=self.adults, currency=self.currency)
+        search = Search((Slice(day, airports, strategy.origin, strategy.airlines, strategy.connecting),), cabin=self.cabin, **common)
+        positioning = None
+        if strategy.position_from:
+            # Home from the gateway on the day you land there.
+            positioning = Search((Slice(day, strategy.origin, strategy.position_from),), cabin="economy", **common)
+        return Job(strategy, city, day, None, search, positioning, leg="back", trip_depart=trip_depart)
 
 
 def _codes(value) -> tuple[str, ...]:
@@ -149,12 +170,15 @@ def load(path: str | Path) -> Watchlist:
     keys = [s.key for s in strategies]
     if len(set(keys)) != len(keys):
         raise ValueError(f"duplicate strategy keys in {keys}")
+    trip = search.get("trip", "one-way")
+    if trip not in TRIP_MODES:
+        raise ValueError(f"trip must be one of {TRIP_MODES}, got {trip!r}")
     step = int(dates.get("step_days", 7))
     if step < 1:
         raise ValueError("step_days must be >= 1")
     return Watchlist(
         cabin=search.get("cabin", "business"),
-        trip=search.get("trip", "one-way"),
+        trip=trip,
         return_after_days=int(search.get("return_after_days", 30)),
         adults=int(search.get("adults", 1)),
         currency=search.get("currency", "USD"),

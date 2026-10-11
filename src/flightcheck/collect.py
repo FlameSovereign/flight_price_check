@@ -51,6 +51,8 @@ def run_job(job: Job, today: date, fetch=google.search) -> tuple[dict, list[dict
         "city": job.city,
         "depart": job.depart.isoformat(),
         "ret": job.ret.isoformat() if job.ret else "",
+        "leg": job.leg,
+        "trip_depart": (job.trip_depart or job.depart).isoformat(),
         "days_out": (job.depart - today).days,
         "url": job.search.url(),
     }
@@ -163,13 +165,15 @@ def collect(
     today: date | None = None,
     limit: int | None = None,
     only: set[str] | None = None,
+    max_minutes: float | None = None,
     fetch=google.search,
     log=print,
+    clock=time.monotonic,
 ) -> pd.DataFrame:
     today = today or local_today()
     jobs = watchlist.jobs(today)
     if only:
-        jobs = [j for j in jobs if j.strategy.key in only or j.city in only]
+        jobs = [j for j in jobs if j.strategy.key in only or j.city in only or j.leg in only]
     if limit:
         jobs = jobs[:limit]
     log(f"{len(jobs)} searches for {today} ({len(watchlist.departure_dates(today))} departure dates)")
@@ -190,8 +194,13 @@ def collect(
 
     observations, history, itineraries = [], [], []
     failures = consecutive = 0
+    deadline = clock() + max_minutes * 60 if max_minutes else None
     try:
         for i, job in enumerate(jobs, start=1):
+            if deadline is not None and clock() > deadline:
+                # Jobs run in departure-date order, so this drops the furthest dates.
+                log(f"time budget of {max_minutes:g} min used up after {i - 1} of {len(jobs)} searches; saving what we have")
+                break
             try:
                 obs, hist, its = run_job(job, today, fetch=polite_fetch)
             except Exception as exc:  # one bad page must not cost the whole day's data

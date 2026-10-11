@@ -3,8 +3,11 @@
 
 [search]
 cabin = "business"          # economy | premium-economy | business | first
-trip = "one-way"            # one-way | round-trip
-return_after_days = 30      # round-trip only: return date = departure + N days
+# one-way       只查去程单程
+# round-trip    一张往返票（打折的商务舱往返票大多最长只能停留约 1 个月，超过就只剩贵的票）
+# two-one-ways  去程单程 + 回程单程分开买（停留超过 1 个月时通常最便宜），两段各自给买/等建议
+trip = "two-one-ways"
+return_after_days = 45      # 回程日期 = 出发日 + N 天（看假期改这个数）
 adults = 1
 currency = "USD"
 request_delay_seconds = 1.0 # pause between Google requests; be polite

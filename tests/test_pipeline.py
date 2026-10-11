@@ -14,7 +14,8 @@ def test_real_watchlist_loads_and_expands():
     wl = config.load(ROOT / "config" / "watchlist.toml")
     jobs = wl.jobs(date(2026, 10, 11))
     assert jobs
-    assert len(jobs) == len(wl.departure_dates(date(2026, 10, 11))) * len(wl.strategies) * len(wl.destinations)
+    legs = 2 if wl.trip == "two-one-ways" else 1
+    assert len(jobs) == len(wl.departure_dates(date(2026, 10, 11))) * len(wl.strategies) * len(wl.destinations) * legs
 
 
 def test_departure_dates_are_stable_across_days():
@@ -250,3 +251,53 @@ def test_report_without_any_history(tmp_path):
     assert not (tmp_path / "data" / "history.csv").exists()
     info = report.build(wl, tmp_path / "data", tmp_path / "reports")
     assert info["metrics"]["status"] == "no price history yet"
+
+
+def test_round_trip_report_shows_return_dates_and_ignores_one_way_rows(tmp_path):
+    from flightcheck import report
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    collect.collect(wl, data, today=date(2026, 10, 11), limit=8, fetch=_fake_fetch, log=lambda *_: None)  # one-way
+    wl.trip, wl.return_after_days = "round-trip", 45
+    collect.collect(wl, data, today=date(2026, 10, 11), limit=8, fetch=_fake_fetch, log=lambda *_: None)
+    report.build(wl, data, reports)
+    md = (reports / "latest.md").read_text()
+    assert "往返（停留 45 天）" in md and "回 2026-12-07" in md
+    obs, _ = report.load_latest_run(data, wl)
+    assert len(obs) == 8 and (obs["ret"] != "").all()
+
+
+def test_two_one_ways_pairs_outbound_and_return_legs(tmp_path):
+    from flightcheck import report
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    wl.trip, wl.return_after_days = "two-one-ways", 45
+    jobs = wl.jobs(date(2026, 10, 11))
+    back = [j for j in jobs if j.leg == "back"]
+    assert len(back) == len(jobs) // 2
+    j = next(j for j in back if j.strategy.key == "iah-ana")
+    assert j.depart == j.trip_depart + timedelta(days=45)
+    assert j.search.slices[0].origins == ("PVG", "SHA") and j.search.slices[0].destinations == ("IAH",)
+    assert j.positioning.slices[0].origins == ("IAH",) and j.positioning.slices[0].destinations == ("ATL",)
+
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    collect.collect(wl, data, today=date(2026, 10, 11), limit=16, fetch=_fake_fetch, log=lambda *_: None)
+    obs = pd.read_csv(data / "observations.csv")
+    assert set(obs["leg"]) == {"out", "back"}
+    assert obs["series_key"].str.endswith(":back").sum() == 8
+    report.build(wl, data, reports)
+    md = (reports / "latest.md").read_text()
+    assert "两张单程" in md and "最便宜的一趟" in md and "合计" in md and "回程" in md
+
+
+def test_time_budget_stops_early_and_keeps_data(tmp_path):
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    ticks = iter(range(0, 10_000, 30))  # every clock() call advances 30 seconds
+    obs = collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=40, max_minutes=2, fetch=_fake_fetch,
+                          log=lambda *_: None, clock=lambda: next(ticks))
+    assert 0 < len(obs) < 40
+    assert len(pd.read_csv(tmp_path / "observations.csv")) == len(obs)

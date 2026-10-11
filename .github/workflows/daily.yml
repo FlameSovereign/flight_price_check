@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +26,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Collect prices and write report
-        run: uv run flightcheck run
+        run: uv run flightcheck run --max-minutes 120
 
       - name: Commit data and report
         run: |

@@ -53,6 +53,7 @@ FEATURES = [
     "dep_month",
     "dep_dow",
     "strategy_code",
+    "leg_code",
 ]
 MIN_HISTORY = 7
 MAX_FILL_DAYS = 3
@@ -130,6 +131,7 @@ def add_features(panel: pd.DataFrame) -> pd.DataFrame:
     panel["dep_dow"] = panel["depart"].dt.dayofweek
     panel["strategy"] = panel["series_key"].str.split(":").str[0]
     panel["strategy_code"] = panel["strategy"].astype("category").cat.codes
+    panel["leg_code"] = panel["series_key"].str.endswith(":back").astype(int)
     return panel.reset_index(drop=True)
 
 

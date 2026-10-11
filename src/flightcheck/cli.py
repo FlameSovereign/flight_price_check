@@ -24,8 +24,9 @@ def main(argv: list[str] | None = None) -> None:
     for name, help_text in (("collect", "run all searches and append to data/"), ("run", "collect, then report")):
         p = sub.add_parser(name, help=help_text, parents=[common])
         p.add_argument("--limit", type=int, help="only run the first N searches")
-        p.add_argument("--only", nargs="*", help="only these strategy keys or cities")
+        p.add_argument("--only", nargs="*", help="only these strategy keys, cities or legs (out/back)")
         p.add_argument("--today", type=date.fromisoformat, help="pretend today is this date")
+        p.add_argument("--max-minutes", type=float, help="stop searching after this long and keep what was collected")
     sub.add_parser("report", help="train the model and write reports/latest.md", parents=[common])
     p_search = sub.add_parser("search", help="one ad-hoc search, printed to the terminal")
     p_search.add_argument("origin", help="e.g. ATL or ATL,IAH")
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd in ("collect", "run"):
         from .collect import collect
 
-        collect(watchlist, data_dir, today=args.today, limit=args.limit, only=set(args.only or []))
+        collect(watchlist, data_dir, today=args.today, limit=args.limit, only=set(args.only or []), max_minutes=args.max_minutes)
     if args.cmd in ("report", "run"):
         from .report import build
 
