@@ -14,6 +14,7 @@ from .config import Watchlist
 
 WEEKDAYS = "一二三四五六日"
 CITY_NAMES = {
+    "china": "全国任意",
     "shanghai": "上海",
     "beijing": "北京",
     "guangzhou": "广州",

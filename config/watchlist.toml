@@ -35,8 +35,11 @@ windows = [
   # { from = "2027-01-28", to = "2027-02-08" },
 ]
 
-# 目的地：一个城市可以包含多个机场，一次搜索全覆盖。
+# 目的地：一个“城市”可以包含多个机场，一次搜索全覆盖（Google 一次最多接受约 10 个机场）。
+# china = 全国 10 个主要机场，回答“落地哪里都行，最便宜是多少”；但多城市搜索 Google 不给 60 天价格历史，
+# 所以上海、北京单独再查一次，给预测模型提供历史数据。
 [destinations]
+china = ["PVG", "SHA", "PEK", "PKX", "CAN", "SZX", "HGH", "CTU", "TFU", "XMN"]
 shanghai = ["PVG", "SHA"]
 beijing = ["PEK", "PKX"]
 # guangzhou = ["CAN"]
