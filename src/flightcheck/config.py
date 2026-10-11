@@ -50,12 +50,15 @@ class DateRange:
     end: date
     step: int = 1
 
-    def dates(self, today: date) -> list[date]:
-        out, day = [], self.start
+    def dates(self, today: date, every: int = 1) -> list[date]:
+        """Dates after `today`; with every=k only each k-th date of the whole window,
+        counted from its start, so the selection stays fixed as dates pass."""
+        out, day, i = [], self.start, 0
         while day <= self.end:
-            if day > today:
+            if day > today and i % every == 0:
                 out.append(day)
             day += timedelta(days=self.step)
+            i += 1
         return out
 
 
@@ -154,7 +157,7 @@ class Watchlist:
                     add(self._return_job(strategy, city, airports, day, None))
         if "round-trip" in self.trips:
             k = self.round_trip_every
-            pairs = [(d, r) for d in out_dates[::k] for r in in_dates[::k] if r > d]
+            pairs = [(d, r) for d in self.outbound.dates(today, k) for r in self.inbound.dates(today, k) if r > d]
             if pairs:
                 # Start at a different pair each day, so if a time budget cuts the
                 # run short it is not always the same pairs that go unsearched.

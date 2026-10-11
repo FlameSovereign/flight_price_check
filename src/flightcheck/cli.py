@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> None:
     for name, help_text in (("collect", "run all searches and append to data/"), ("run", "collect, then report")):
         p = sub.add_parser(name, help=help_text, parents=[common])
         p.add_argument("--limit", type=int, help="only run the first N searches")
-        p.add_argument("--only", nargs="*", help="only these strategy keys, cities or legs (out/back)")
+        p.add_argument("--only", nargs="*", help="only these strategy keys, cities or ticket kinds (out, back, rt)")
         p.add_argument("--today", type=date.fromisoformat, help="pretend today is this date")
         p.add_argument("--max-minutes", type=float, help="stop searching after this long and keep what was collected")
         p.add_argument("--resume", action="store_true", help="skip searches already recorded today")

@@ -29,6 +29,7 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 HISTORY_KEY = ["series_key", "depart", "ret", "obs_date"]
 TOP_ITINERARIES = 5
 MAX_CONSECUTIVE_FAILURES = 8
+SECONDS_PER_SEARCH = 3.0  # observed 2-5 s including the polite delay
 
 
 def local_today() -> date:
@@ -200,6 +201,9 @@ def collect(
     if limit:
         jobs = jobs[:limit]
     log(f"{len(jobs)} searches for {today}")
+    if max_minutes and len(jobs) * SECONDS_PER_SEARCH > max_minutes * 60:
+        log(f"warning: {len(jobs)} searches take about {len(jobs) * SECONDS_PER_SEARCH / 60:.0f} min, more than the "
+            f"{max_minutes:g} min budget; raise step_days or round_trip_every in [dates] to search fewer dates")
     if not jobs:
         log("nothing to search: every date in the watchlist has passed (or --only matched nothing); update [dates]")
         return pd.DataFrame()
@@ -224,7 +228,9 @@ def collect(
     try:
         for i, job in enumerate(jobs, start=1):
             if deadline is not None and clock() > deadline:
-                # Jobs run in departure-date order, so this drops the furthest dates.
+                # Rolling grid: jobs run in departure-date order, so this drops the furthest
+                # dates. Fixed windows: single legs run first and round-trip pairs last, in
+                # an order that rotates daily, so a different set of pairs is dropped each day.
                 log(f"time budget of {max_minutes:g} min used up after {i - 1} of {len(jobs)} searches; saving what we have")
                 break
             try:

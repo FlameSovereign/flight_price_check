@@ -325,7 +325,9 @@ def test_fixed_windows_pair_every_outbound_with_every_return(tmp_path):
     info = report.build(wl, data, reports)
     md = (reports / "latest.md").read_text()
     assert "去程 \\ 回程" in md and "现在更便宜的买法" in md and "两张单程最低合计" in md
-    assert info["alerts"] and "往返票" in (reports / "alerts.md").read_text()
+    alert_text = (reports / "alerts.md").read_text()
+    assert info["alerts"] and "### 往返票" in alert_text
+    assert "### 去程单程" not in alert_text and "### 回程单程" not in alert_text  # one_way = 1 never fires
     # Windows drop dates that have passed.
     assert all(j.depart > date(2027, 5, 5) for j in wl.jobs(date(2027, 5, 5)) if j.leg == "out")
 
@@ -458,3 +460,14 @@ def test_return_positioning_flies_on_the_landing_day(tmp_path):
 
     collect.collect(wl, tmp_path, today=date(2026, 10, 11), only={"back"}, fetch=fetch, log=lambda *_: None)
     assert seen and all(d.day in (2, 8) for d in seen)  # Aug 1 / Aug 7 departures land Aug 2 / Aug 8
+
+
+def test_round_trip_pair_selection_stays_fixed_as_dates_pass():
+    wl = _windows(config.load(FIXTURE), out=(date(2027, 5, 1), date(2027, 5, 31), 2), back=(date(2027, 8, 1), date(2027, 8, 25), 3))
+    wl.round_trip_every = 2
+    def outs(today):
+        return {j.depart for j in wl.jobs(today) if j.ret}
+    early = outs(date(2026, 10, 11))
+    for today in (date(2027, 5, 2), date(2027, 5, 4)):  # an odd and an even number of dates have passed
+        assert outs(today) == {d for d in early if d > today}  # the same dates, minus the ones that passed
+    assert {j.leg for j in wl.jobs(date(2026, 10, 11))} == {"out", "back", "rt"}
