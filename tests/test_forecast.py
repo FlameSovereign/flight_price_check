@@ -147,3 +147,13 @@ def test_outlook_works_before_any_fare_has_moved():
     flat = _leg_history().assign(price=3000.0)  # a brand-new watchlist: not a single jump yet
     o = forecast.outlook(flat, _watchlist(), n_paths=50)
     assert o.status == "ok" and all(np.allclose(leg.range30, 3000) for leg in o.legs)
+
+
+def test_routes_without_enough_history_are_left_out():
+    hist = _leg_history()
+    new = hist[(hist["series_key"] == "atl-any:beijing:back") & (hist["obs_date"] >= hist["obs_date"].max() - pd.Timedelta(days=2))]
+    hist = pd.concat([hist, new.assign(series_key="atl-any:china:back")], ignore_index=True)
+    wl = _watchlist()
+    wl.destinations = dict(wl.destinations, china=("PVG", "PEK"))
+    o = forecast.outlook(hist, wl, n_paths=50)
+    assert "atl-any:china:back" not in {leg.series_key for leg in o.legs}

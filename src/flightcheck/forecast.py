@@ -42,6 +42,7 @@ TRAIN_DAYS = 120  # fit on this many days of observations; moves older than that
 N_PATHS = 2000
 RANGE_DAYS = 30  # "price in a month" range: the longest horizon that was backtested
 LEGS_PER_KIND = 4
+MIN_ROUTE_DAYS = 14  # a route needs this many observed days before its legs are forecast
 CHECKPOINTS = 4  # month starts before the trip to report chances for
 SPLIT_STEP = 50
 QS = (0.1, 0.5, 0.9)
@@ -136,6 +137,10 @@ def _pick_legs(panel: pd.DataFrame, last: pd.Timestamp, watchlist: Watchlist) ->
     rows = panel[panel["obs_date"] >= last - pd.Timedelta(days=1)]
     rows = rows.sort_values("obs_date").groupby(["series_key", "depart"], sort=False).tail(1)
     rows = rows[rows["strategy"].isin({s.key for s in watchlist.strategies}) & rows["city"].isin(set(watchlist.destinations))]
+    # A route added a few days ago has no moves of its own to learn from; its legs would get
+    # generic, much wider paths (a new "china" search priced the same fare as "beijing" at 10x the chance).
+    days = panel.groupby("series_key")["obs_date"].nunique()
+    rows = rows[rows["series_key"].map(days).fillna(0) >= MIN_ROUTE_DAYS]
     min_out = watchlist.model.min_days_out
     windows = {"out": watchlist.outbound, "back": watchlist.inbound}
     picked = []
