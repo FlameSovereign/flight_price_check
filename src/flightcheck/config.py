@@ -45,6 +45,25 @@ class ModelSettings:
 
 
 @dataclass(frozen=True)
+class TripSettings:
+    """Your commitment to the trip; the playbook will not tell you to buy before you decide to go."""
+
+    committed: bool = False  # the trip is happening (until then the report only says what it *would* buy)
+    decide_by: date | None = None  # deadline for that decision
+    cap: float | None = None  # walk-away price for the whole trip, positioning included
+    purchased: bool = False  # bought: stop recommending and alerting
+
+
+@dataclass(frozen=True)
+class PlaybookSettings:
+    good: float = 5500  # [round_trip target, good]: buy at the recent floor, else wait a few days
+    ok: float = 6000  # (good, ok]: acceptable once the cheap fares stop coming back
+    carrier_lines: dict[str, float] = field(default_factory=lambda: {"TK": 5500})  # buy same day at or below
+    allow: tuple[str, ...] = ("TK", "NH", "JL", "CX", "QR", "EY", "KE", "OZ", "CI", "BR", "SQ", "DL", "UA", "AA", "AC")
+    checks_from: date | None = None  # start of the twice-weekly hand checks on airline sites
+
+
+@dataclass(frozen=True)
 class DateRange:
     start: date
     end: date
@@ -100,6 +119,8 @@ class Watchlist:
     outbound: DateRange | None = None  # fixed travel windows; None = rolling grid
     inbound: DateRange | None = None
     round_trip_every: int = 1  # pair only every n-th window date for round trips (fewer searches)
+    trip: TripSettings = field(default_factory=TripSettings)
+    playbook: PlaybookSettings = field(default_factory=PlaybookSettings)
 
     def departure_dates(self, today: date) -> list[date]:
         first = today + timedelta(days=self.start_days)
@@ -267,6 +288,42 @@ def load(path: str | Path) -> Watchlist:
         outbound=outbound,
         inbound=inbound,
         round_trip_every=max(1, int(dates.get("round_trip_every", 1))),
+        trip=_trip(raw.get("trip", {})),
+        playbook=_playbook(raw.get("playbook", {}), alerts.get("round_trip")),
+    )
+
+
+def _date_or_none(value) -> date | None:
+    return date.fromisoformat(str(value)) if value else None
+
+
+def _trip(raw: dict) -> TripSettings:
+    unknown = set(raw) - set(TripSettings.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"unknown [trip] keys {sorted(unknown)}")
+    cap = float(raw.get("cap") or 0)
+    return TripSettings(
+        committed=bool(raw.get("committed", False)),
+        decide_by=_date_or_none(raw.get("decide_by")),
+        cap=cap or None,
+        purchased=bool(raw.get("purchased", False)),
+    )
+
+
+def _playbook(raw: dict, target: float | None) -> PlaybookSettings:
+    unknown = set(raw) - set(PlaybookSettings.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"unknown [playbook] keys {sorted(unknown)}")
+    defaults = PlaybookSettings()
+    good, ok = float(raw.get("good", defaults.good)), float(raw.get("ok", defaults.ok))
+    if target is not None and not target <= good <= ok:
+        raise ValueError(f"[playbook] needs [alerts] round_trip <= good <= ok, got {target}, {good}, {ok}")
+    return PlaybookSettings(
+        good=good,
+        ok=ok,
+        carrier_lines={str(k).upper(): float(v) for k, v in raw.get("carrier_lines", defaults.carrier_lines).items()},
+        allow=_codes(raw["allow"]) if "allow" in raw else defaults.allow,
+        checks_from=_date_or_none(raw.get("checks_from")),
     )
 
 
