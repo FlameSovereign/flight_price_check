@@ -126,14 +126,20 @@ def build(watchlist: Watchlist, data_dir: Path, reports_dir: Path) -> dict:
     )
     names = {s.key: s.name for s in watchlist.strategies}
     try:
-        decision = playbook.decide(obs, history, watchlist, run_date, playbook.load_quotes(data_dir), names)
+        quotes, bad_quotes = None, 0
+        try:
+            quotes, bad_quotes = playbook.load_quotes(data_dir)
+        except Exception as exc:  # a hand-edited file must not cost the day's call
+            print(f"manual quotes unreadable: {exc!r}", file=sys.stderr)
+            bad_quotes = 1
+        decision = playbook.decide(obs, playbook.load_itineraries(data_dir, run_date), watchlist, run_date,
+                                   quotes, names, bad_quotes)
         playbook.log_decision(decision, data_dir)
     except Exception as exc:  # never lose the day's report (and its data commit) over it
         print(f"playbook failed: {exc!r}", file=sys.stderr)
         decision = playbook.Decision(run_date, "pass", f"买票规则出错：{exc!r}")
-    live = watchlist.trip.committed and not watchlist.trip.purchased
 
-    alerts = _alerts(obs, watchlist, names, Path(data_dir) / ALERT_STATE, run_date, decision.buys if live else [])
+    alerts = _alerts(obs, watchlist, names, Path(data_dir) / ALERT_STATE, run_date, decision)
     alert_path = reports_dir / "alerts.md"
     if alerts:
         alert_path.write_text(alerts, encoding="utf-8")
@@ -410,11 +416,12 @@ def _playbook_section(d: playbook.Decision) -> list[str]:
     lines += [f"- {n}" for n in d.notes]
     if d.notes:
         lines.append("")
-    if d.options:
+    shown = d.shown()
+    if shown:
         lines += [_table(
             ["动作", "类别", "价格（含定位）", "日期", "走法", "依据"],
             [[f"**{playbook.ACTIONS[o.action]}**" if o.action == "buy" else playbook.ACTIONS[o.action], o.tier,
-              _money(o.total), _trip_dates(o), o.desc, o.reason] for o in d.options],
+              _money(o.total), _trip_dates(o), o.desc.replace("|", "/"), o.reason] for o in shown],
         ), "", "类别：A1 = 一张票、一家航司、每程最多转一次；A2 = 一张票、同一联盟，多的一站是北美国内接驳；B = 其他，只作参考。", ""]
     if d.milestones:
         picks = d.milestones if len(d.milestones) <= 5 else [d.milestones[round(i * (len(d.milestones) - 1) / 4)] for i in range(5)]
@@ -531,18 +538,79 @@ def _model_section(m: dict, watchlist: Watchlist) -> list[str]:
 
 
 def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Path, run_date: date,
-            buys: list | None = None) -> str:
-    """Tickets under their alert price that were never alerted, or are cheaper than when last alerted.
+            decision: playbook.Decision | None = None) -> str:
+    """What to open an issue about today; empty when nothing is new.
 
-    [alerts] round_trip applies to round-trip tickets, one_way to single legs.
+    Before the trip is committed: price alerts. [alerts] round_trip applies to round-trip
+    tickets and to two one-ways together, one_way to single legs, and only tier-A tickets
+    (one ticket, one airline or alliance) count. Once committed: the playbook's "buy" calls
+    instead. Once purchased: nothing.
     The alerted prices live in a state file, so a partial run, a failed search or a
     same-day rerun cannot make old alerts look new. A ticket that climbs back above
-    the limit is forgotten, so its next drop under the limit alerts again.
+    the limit (or stops being a buy) is forgotten, so its next drop alerts again.
     """
+    trip = watchlist.trip
+    if trip.purchased:
+        return ""
     state: dict[tuple, float] = {}
     if state_path.exists():
         old = pd.read_csv(state_path, dtype=str, keep_default_na=False)
         state = {tuple(r[k] for k in ALERT_KEY): float(r["total_price"]) for _, r in old.iterrows()}
+    hits, pair_hits, buy_hits = [], [], []
+    if trip.committed:
+        buy_hits = _playbook_hits(decision, state)
+    else:
+        hits, pair_hits = _price_hits(obs, watchlist, state)
+
+    today = run_date.isoformat()
+    rows = [dict(zip(ALERT_KEY, k), total_price=int(v)) for k, v in sorted(state.items()) if not k[1] or k[1] >= today]
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=ALERT_KEY + ["total_price"]).to_csv(state_path, index=False)
+    if not hits and not pair_hits and not buy_hits:
+        return ""
+    labels = {"round_trip": "往返票", "one_way": "单程"}
+    limits = "，".join(f"{labels.get(k, k)} ≤ {_money(v)}" for k, v in watchlist.alerts.items())
+    sections, summary = [], []
+    if buy_hits:
+        summary.append(f"按你的买法，{len(buy_hits)} 张票现在该买（不一定低于提醒价）。")
+        sections += ["### 按你的买法：现在该买", "", _table(
+            ["走法", "日期", "价格", "为什么"],
+            [[o.desc, _trip_dates(o), f"**{_money(o.total)}**", o.reason] for o in buy_hits],
+        ), "", "美国出发、出发前 ≥7 天在航司官网下单，24 小时内可免费取消或保留。", ""]
+    if hits or pair_hits:
+        summary.append(f"{len(hits) + len(pair_hits)} 项新跌破提醒价，或比上次提醒时更便宜（{limits}；两张单程合计按往返价算；只算 A 类票）：")
+    if pair_hits:
+        sections += ["### 两张单程合计", "", _table(
+            ["城市", "去程", "回程", "合计"],
+            [[_city(c), _leg_line(o, names), _leg_line(b, names), f"**{_money(t)}**"] for c, (o, b, t) in pair_hits],
+        ), ""]
+    for kind in ("rt", "out", "back"):
+        rows_k = [r for r in hits if r["kind"] == kind]
+        if rows_k:
+            sections += [f"### {KIND_NAMES[kind]}", "", _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for r in rows_k]), ""]
+    return "# 价格提醒\n\n" + " ".join(summary) + "\n\n" + "\n".join(sections).rstrip() + "\n"
+
+
+def _playbook_hits(decision: playbook.Decision | None, state: dict) -> list:
+    """Today's buy calls not alerted before at this price or lower. Calls that went away
+    (priced today, no longer a buy) are forgotten, so they alert again if they come back."""
+    if decision is None:
+        return []
+    buying = {o.key for o in decision.options if o.action == "buy"}
+    for o in decision.options:
+        if o.key in state and o.key not in buying:
+            state.pop(o.key)
+    hits = []
+    for o in decision.buys:
+        if o.key not in state or o.total < state[o.key]:
+            hits.append(o)
+            state[o.key] = float(o.total)
+    return hits
+
+
+def _price_hits(obs: pd.DataFrame, watchlist: Watchlist, state: dict) -> tuple[list, list]:
+    allow = watchlist.playbook.allow
+    obs = obs[[playbook.tier(f, r, allow) != "B" for f, r in zip(obs["flights"], obs["route"])]] if not obs.empty else obs
     hits = []
     for _, r in obs.sort_values("total_price").iterrows():
         limit = watchlist.alerts.get("round_trip" if r["kind"] == "rt" else "one_way")
@@ -575,35 +643,4 @@ def _alerts(obs: pd.DataFrame, watchlist: Watchlist, names: dict, state_path: Pa
             else:
                 state.pop(key, None)
 
-    # The playbook's "buy" calls (above the alert price but good enough for the phase).
-    buy_hits = []
-    for o in buys or []:
-        if o.key not in state or o.total < state[o.key]:
-            buy_hits.append(o)
-            state[o.key] = float(o.total)
-
-    today = run_date.isoformat()
-    rows = [dict(zip(ALERT_KEY, k), total_price=int(v)) for k, v in sorted(state.items()) if not k[1] or k[1] >= today]
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows, columns=ALERT_KEY + ["total_price"]).to_csv(state_path, index=False)
-    if not hits and not pair_hits and not buy_hits:
-        return ""
-    labels = {"round_trip": "往返票", "one_way": "单程"}
-    limits = "，".join(f"{labels.get(k, k)} ≤ {_money(v)}" for k, v in watchlist.alerts.items())
-    sections = []
-    if buy_hits:
-        sections += ["### 按你的买法：现在该买", "", _table(
-            ["走法", "日期", "价格", "为什么"],
-            [[o.desc, _trip_dates(o), f"**{_money(o.total)}**", o.reason] for o in buy_hits],
-        ), "", "美国出发、出发前 ≥7 天在航司官网下单，24 小时内可免费取消或保留。", ""]
-    if pair_hits:
-        sections += ["### 两张单程合计", "", _table(
-            ["城市", "去程", "回程", "合计"],
-            [[_city(c), _leg_line(o, names), _leg_line(b, names), f"**{_money(t)}**"] for c, (o, b, t) in pair_hits],
-        ), ""]
-    for kind in ("rt", "out", "back"):
-        rows_k = [r for r in hits if r["kind"] == kind]
-        if rows_k:
-            sections += [f"### {KIND_NAMES[kind]}", "", _table(_deal_headers(watchlist, kind), [_deal_row(r, names) for r in rows_k]), ""]
-    count = len(hits) + len(pair_hits) + len(buy_hits)
-    return f"# 价格提醒\n\n{count} 项新跌破提醒价，或比上次提醒时更便宜（{limits}；两张单程合计按往返价算）：\n\n" + "\n".join(sections).rstrip() + "\n"
+    return hits, pair_hits

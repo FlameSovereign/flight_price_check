@@ -42,8 +42,8 @@ def _fake_fetch(search):
     price = 5000 + (s.date.toordinal() % 7) * 100
     via = "HND" if s.connecting else "ICN"
     its = [
-        google.Itinerary(price, ["X"], f"{s.origins[0]}-{via}-{s.destinations[0]}", ["XX1", "XX2"], 1, 900, None, None),
-        google.Itinerary(price - 400, ["Y"], f"{s.origins[0]}-LAX-{s.destinations[0]}", ["YY1", "YY2"], 1, 900, None, None),
+        google.Itinerary(price, ["Korean Air"], f"{s.origins[0]}-{via}-{s.destinations[0]}", ["KE1", "KE2"], 1, 900, None, None),
+        google.Itinerary(price - 400, ["Qatar Airways"], f"{s.origins[0]}-LAX-{s.destinations[0]}", ["QR1", "QR2"], 1, 900, None, None),
     ]
     hist = [(date(2026, 10, 11) - timedelta(days=i), price + i) for i in range(5)][::-1]
     insight = None if s.connecting else google.Insight(price - 400, price, price - 800, price + 800, 3, hist)

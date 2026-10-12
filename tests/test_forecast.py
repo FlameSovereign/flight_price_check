@@ -141,3 +141,9 @@ def test_report_shows_the_outlook_and_survives_a_forecast_failure(tmp_path, monk
     report.build(wl, data, reports)
     md = (reports / "latest.md").read_text()
     assert "预测出错" in md and "## 模型：现在买还是再等等？" in md
+
+
+def test_outlook_works_before_any_fare_has_moved():
+    flat = _leg_history().assign(price=3000.0)  # a brand-new watchlist: not a single jump yet
+    o = forecast.outlook(flat, _watchlist(), n_paths=50)
+    assert o.status == "ok" and all(np.allclose(leg.range30, 3000) for leg in o.legs)

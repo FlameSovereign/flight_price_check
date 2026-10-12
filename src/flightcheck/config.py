@@ -303,11 +303,18 @@ def _trip(raw: dict) -> TripSettings:
         raise ValueError(f"unknown [trip] keys {sorted(unknown)}")
     cap = float(raw.get("cap") or 0)
     return TripSettings(
-        committed=bool(raw.get("committed", False)),
+        committed=_flag(raw, "committed"),
         decide_by=_date_or_none(raw.get("decide_by")),
         cap=cap or None,
-        purchased=bool(raw.get("purchased", False)),
+        purchased=_flag(raw, "purchased"),
     )
+
+
+def _flag(raw: dict, key: str) -> bool:
+    value = raw.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"[trip] {key} must be true or false (without quotes), got {value!r}")
+    return value
 
 
 def _playbook(raw: dict, target: float | None) -> PlaybookSettings:
@@ -315,9 +322,13 @@ def _playbook(raw: dict, target: float | None) -> PlaybookSettings:
     if unknown:
         raise ValueError(f"unknown [playbook] keys {sorted(unknown)}")
     defaults = PlaybookSettings()
-    good, ok = float(raw.get("good", defaults.good)), float(raw.get("ok", defaults.ok))
-    if target is not None and not target <= good <= ok:
-        raise ValueError(f"[playbook] needs [alerts] round_trip <= good <= ok, got {target}, {good}, {ok}")
+    # Unset lines follow a higher target instead of failing the whole watchlist.
+    good = float(raw["good"]) if "good" in raw else max(defaults.good, target or 0)
+    ok = float(raw["ok"]) if "ok" in raw else max(defaults.ok, good)
+    if good > ok:
+        raise ValueError(f"[playbook] needs good <= ok, got {good}, {ok}")
+    if target is not None and target > good:
+        raise ValueError(f"[playbook] needs [alerts] round_trip <= good, got {target}, {good}")
     return PlaybookSettings(
         good=good,
         ok=ok,

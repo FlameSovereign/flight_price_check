@@ -235,9 +235,13 @@ class Forecaster:
         X = np.hstack([self._onehot(ri)] + blocks)
         y = o["d"].values
         cls = np.where(y < -THR, 1, np.where(y > THR, 2, 0))
-        self.clf = LogisticRegression(C=self.C, max_iter=5000)
-        self.clf.fit(X, cls)
-        self.classes_ = self.clf.classes_
+        self.clf = None
+        if len(np.unique(cls)) >= 2:
+            self.clf = LogisticRegression(C=self.C, max_iter=5000)
+            self.clf.fit(X, cls)
+            self.classes_ = self.clf.classes_
+        else:  # no jumps at all yet (e.g. a brand-new watchlist): every day is a stay
+            self.classes_ = np.unique(cls)
         self.full3 = len(self.classes_) == 3
         if self.full3:
             self.coef_route = self.clf.coef_[:, :self.n_routes]          # (3, n_routes)
@@ -305,7 +309,10 @@ class Forecaster:
         if not self.full3:
             X = np.hstack([self._onehot(ri)] + blocks)
             P = np.zeros((len(X), 3))
-            P[:, self.classes_] = self.clf.predict_proba(X)
+            if self.clf is None:
+                P[:, self.classes_] = 1.0
+            else:
+                P[:, self.classes_] = self.clf.predict_proba(X)
             return P
         z = self.coef_route[:, ri].T + self.intercept[None, :]
         if re is not None:
