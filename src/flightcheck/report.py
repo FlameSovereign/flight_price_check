@@ -618,12 +618,19 @@ def _price_hits(obs: pd.DataFrame, watchlist: Watchlist, state: dict) -> tuple[l
         if limit is None or pd.isna(total):
             continue  # no alert configured, or no price today: keep what we knew
         key = tuple(str(r[k]) for k in ALERT_KEY)
+        # The same flights on the same dates found by several city searches (e.g. "china"
+        # and "beijing") are one fare: alert it once.
+        fare = (f"fare:{r['kind']}:{r['flights']}", str(r["depart"]), str(r["ret"]))
         if total <= limit:
-            if key not in state or total < state[key]:
+            new_low = key not in state or total < state[key]
+            if new_low and not (fare in state and state[fare] <= total):
                 hits.append(r)
+            if new_low:
                 state[key] = float(total)
+            state[fare] = min(state.get(fare, float(total)), float(total))
         else:
             state.pop(key, None)
+            state.pop(fare, None)
 
     # Two one-ways count as a round trip: alert when together they beat round_trip.
     pair_hits = []

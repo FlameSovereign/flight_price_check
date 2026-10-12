@@ -352,3 +352,17 @@ def test_price_alerts_skip_tier_b(tmp_path):
     wl = _small(_watchlist())
     obs = _obs([_rt("2027-05-05", "2027-08-07", 4600, flights="PR127 PR336", route="ATL-MNL-PVG")])
     assert report._alerts(obs, wl, {}, tmp_path / "a.csv", TODAY, _decide(obs, wl)) == ""
+
+
+def test_one_fare_found_by_several_city_searches_alerts_once(tmp_path):
+    wl = _small(_watchlist())
+    state = tmp_path / "alerted.csv"
+    back = {"kind": "back", "depart": "2027-08-04", "total_price": 2715.0, "flights": "QR893 QR755", "route": "PKX-DOH-ATL"}
+    beijing = _obs([back | {"series_key": "atl-any:beijing:back", "city": "beijing"}])
+    text = report._alerts(beijing, wl, {}, state, TODAY, _decide(beijing, wl))
+    assert "QR893" in text
+    both = _obs([back | {"series_key": "atl-any:beijing:back", "city": "beijing"},
+                 back | {"series_key": "atl-any:china:back", "city": "china"}])
+    assert report._alerts(both, wl, {}, state, TODAY, _decide(both, wl)) == ""  # the china search finds the same fare
+    cheaper = _obs([back | {"series_key": "atl-any:china:back", "city": "china", "total_price": 2600.0}])
+    assert "2,600" in report._alerts(cheaper, wl, {}, state, TODAY, _decide(cheaper, wl))  # a new low still alerts
