@@ -2,8 +2,13 @@ name: Tests
 
 on:
   pull_request:
+    # The daily job commits only data/ and reports/. Those pushes come from the
+    # Actions bot, so their test runs wait for manual approval ("action required")
+    # and leave the PR looking unfinished; data alone cannot break the tests.
+    paths-ignore: ["data/**", "reports/**"]
   push:
     branches: [main]
+    paths-ignore: ["data/**", "reports/**"]
 
 permissions:
   contents: read
