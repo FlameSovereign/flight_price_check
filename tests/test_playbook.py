@@ -366,3 +366,12 @@ def test_one_fare_found_by_several_city_searches_alerts_once(tmp_path):
     assert report._alerts(both, wl, {}, state, TODAY, _decide(both, wl)) == ""  # the china search finds the same fare
     cheaper = _obs([back | {"series_key": "atl-any:china:back", "city": "china", "total_price": 2600.0}])
     assert "2,600" in report._alerts(cheaper, wl, {}, state, TODAY, _decide(cheaper, wl))  # a new low still alerts
+
+
+def test_a_few_dollars_lower_is_not_a_new_alert(tmp_path):
+    wl = _small(_watchlist())
+    state = tmp_path / "alerted.csv"
+    back = {"kind": "back", "depart": "2027-08-07", "flights": "QR893 QR755", "route": "PKX-DOH-ATL"}
+    for price, expected in ((2771.0, True), (2770.0, False), (2700.0, False), (2650.0, True)):
+        obs = _obs([back | {"total_price": price}])
+        assert bool(report._alerts(obs, wl, {}, state, TODAY, _decide(obs, wl))) == expected, price

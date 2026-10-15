@@ -602,10 +602,16 @@ def _playbook_hits(decision: playbook.Decision | None, state: dict) -> list:
             state.pop(o.key)
     hits = []
     for o in decision.buys:
-        if o.key not in state or o.total < state[o.key]:
+        if _new_low(state.get(o.key), o.total):
             hits.append(o)
             state[o.key] = float(o.total)
     return hits
+
+
+def _new_low(alerted: float | None, price: float) -> bool:
+    """Never alerted, or at least one fare step (3%) under the alerted price: a $1 currency
+    wiggle on a return priced in yuan is not news."""
+    return alerted is None or price < alerted * (1 - playbook.STEP)
 
 
 def _price_hits(obs: pd.DataFrame, watchlist: Watchlist, state: dict) -> tuple[list, list]:
@@ -622,12 +628,13 @@ def _price_hits(obs: pd.DataFrame, watchlist: Watchlist, state: dict) -> tuple[l
         # and "beijing") are one fare: alert it once.
         fare = (f"fare:{r['kind']}:{r['flights']}", str(r["depart"]), str(r["ret"]))
         if total <= limit:
-            new_low = key not in state or total < state[key]
-            if new_low and not (fare in state and state[fare] <= total):
+            new_low = _new_low(state.get(key), total)
+            if new_low and _new_low(state.get(fare), total):
                 hits.append(r)
+                state[fare] = float(total)
             if new_low:
                 state[key] = float(total)
-            state[fare] = min(state.get(fare, float(total)), float(total))
+            state.setdefault(fare, float(total))
         else:
             state.pop(key, None)
             state.pop(fare, None)
