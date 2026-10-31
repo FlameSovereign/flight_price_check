@@ -1,0 +1,75 @@
+# Frozen copy of the watchlist for tests. Edit config/watchlist.toml freely; tests use this file
+# so that changing destinations or dates never breaks them (or the daily job).
+
+[search]
+cabin = "business"          # economy | premium-economy | business | first
+trip = "one-way"            # one-way | round-trip
+return_after_days = 30      # round-trip only: return date = departure + N days
+adults = 1
+currency = "USD"
+request_delay_seconds = 1.0 # pause between Google requests; be polite
+
+[dates]
+# 扫描未来 start_days..end_days 天内的出发日，每 step_days 天一个。
+# 日期锚定在固定日历上，所以每天跑的是同一批出发日，价格曲线能连起来。
+# step_days 不是 7 的倍数，出发日会轮流落在一周的不同天。
+start_days = 10
+end_days = 270
+step_days = 6
+
+# 重点窗口：窗口内每天都扫（例如春节前后）。
+windows = [
+  # { from = "2027-01-28", to = "2027-02-08" },
+]
+
+# 目的地：一个城市可以包含多个机场，一次搜索全覆盖。
+[destinations]
+shanghai = ["PVG", "SHA"]
+beijing = ["PEK", "PKX"]
+# guangzhou = ["CAN"]
+# shenzhen = ["SZX"]
+# chengdu = ["TFU", "CTU"]
+
+# 策略：每个策略 × 每个目的地 × 每个出发日 = 一次搜索。
+# origin      出发机场
+# airlines    只看这些航司（Google 仍会返回 60 天价格历史）
+# connecting  只允许在这些机场转机（Google 不再返回价格历史，只有当天价格）
+# via         结果里必须经过这些机场之一（本地过滤）
+# position_from  另查一张从这里到 origin 的经济舱单程，计入总价（分开出票）
+# position_days_before  定位航段提前几天飞（默认 1：前一天飞到，分开出票别赶同一天的衔接；不含酒店）
+
+[[strategy]]
+key = "atl-any"
+name = "ATL 直接出发 · 任意航司"
+origin = ["ATL"]
+
+[[strategy]]
+key = "atl-tk"
+name = "ATL → 伊斯坦布尔转机 · 土耳其航空"
+origin = ["ATL"]
+airlines = ["TK"]
+
+[[strategy]]
+key = "atl-japan"
+name = "ATL 出发 · 经东京转机（一张票）"
+origin = ["ATL"]
+connecting = ["IAH", "ORD", "DFW", "LAX", "SFO", "SEA", "JFK", "YYZ", "YVR", "NRT", "HND"]
+via = ["NRT", "HND"]
+
+[[strategy]]
+key = "iah-ana"
+name = "先飞休斯顿 · IAH 出发全日空"
+origin = ["IAH"]
+airlines = ["NH"]
+position_from = ["ATL"]
+
+[model]
+horizon_days = 14     # 预测"未来 N 天内会不会更便宜"
+drop_threshold = 0.03 # 至少便宜 3% 才算"值得等"
+wait_above = 0.55     # 模型：P(降价) 高于这个 → 等，否则买
+min_days_out = 21     # 离出发不到这么多天就不建议再等
+rule_margin = 0.05    # 规则：比 28 天最低价贵这么多 → 便宜的舱位最近开过，可能再开，等
+
+[alerts]
+round_trip = 5000
+one_way = 3800
