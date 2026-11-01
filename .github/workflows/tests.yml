@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    # The daily job commits only data/ and reports/; data alone cannot break the tests.
+    # (On a pull request GitHub filters paths by the whole PR diff, so this only helps on main.)
+    paths-ignore: ["data/**", "reports/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Tests
+        run: uv run pytest -q
