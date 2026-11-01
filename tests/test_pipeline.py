@@ -68,6 +68,20 @@ def test_collect_writes_data_and_applies_filters(tmp_path):
     assert len(pd.read_csv(tmp_path / "history.csv")) == len(hist)
 
 
+def test_history_points_dated_after_today_are_dropped(tmp_path):
+    def fetch(search):
+        result = _fake_fetch(search)
+        if result.insight:  # a return leg from China searched after Beijing midnight
+            result.insight.history.append((date(2026, 10, 12), 1))
+        return result
+
+    wl = config.load(FIXTURE)
+    wl.request_delay = 0
+    collect.collect(wl, tmp_path, today=date(2026, 10, 11), limit=8, fetch=fetch, log=lambda *_: None)
+    hist = pd.read_csv(tmp_path / "history.csv")
+    assert hist["obs_date"].max() == "2026-10-11" and 1 not in set(hist["price"])
+
+
 def _synthetic_history(n_series=24, days=70, seed=0):
     rng = np.random.default_rng(seed)
     rows = []

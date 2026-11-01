@@ -106,9 +106,12 @@ def run_job(job: Job, today: date, fetch=google.search) -> tuple[dict, list[dict
     base = {"series_key": job.series_key, "depart": obs["depart"], "ret": obs["ret"]}
     history = []
     # The embedded history tracks Google's unfiltered cheapest price, so it only
-    # matches our number when no local `via` filter changed the answer.
-    if insight and insight.history and not job.strategy.via:
-        history = [{**base, "obs_date": d.isoformat(), "price": p, "source": "google"} for d, p in insight.history]
+    # matches our number when no local `via` filter changed the answer. Google
+    # dates each point by the origin's calendar, so a return leg from China
+    # searched after 16:00 UTC already has a point for tomorrow: leave it out.
+    points = [(d, p) for d, p in insight.history if d <= today] if insight else []
+    if points and not job.strategy.via:
+        history = [{**base, "obs_date": d.isoformat(), "price": p, "source": "google"} for d, p in points]
     elif best is not None:
         history = [{**base, "obs_date": today.isoformat(), "price": best.price, "source": "observed"}]
 
