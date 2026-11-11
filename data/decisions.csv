@@ -29,3 +29,4 @@ date,action,kind,tier,total,depart,ret,city,reason,desc
 2026-11-08,pass,pair,A2,6254,2027-05-05,2027-08-04,china/beijing,两张单程只在兜底点（D-80）才考虑，之前先别动,"去 ATL-SEA-HKG-CAN（Alaska + Cathay Pacific）$3,203 + 回 PKX-DOH-ATL（Qatar Airways）$2,751 + 换城市 $150 + 分票风险 $150"
 2026-11-09,pass,pair,A2,6872,2027-05-05,2027-08-04,shanghai/beijing,两张单程只在兜底点（D-80）才考虑，之前先别动,"去 ATL-DFW-HKG-SHA（American + Cathay Pacific）$3,819 + 回 PKX-DOH-ATL（Qatar Airways）$2,753 + 换城市 $150 + 分票风险 $150"
 2026-11-10,pass,pair,A2,6256,2027-05-05,2027-08-10,china/beijing,两张单程只在兜底点（D-80）才考虑，之前先别动,"去 ATL-SEA-HKG-CAN（Alaska + Cathay Pacific）$3,203 + 回 PKX-DOH-ATL（Qatar Airways）$2,753 + 换城市 $150 + 分票风险 $150"
+2026-11-11,pass,pair,A2,5931,2027-05-19,2027-08-04,china/beijing,两张单程只在兜底点（D-80）才考虑，之前先别动,"去 ATL-SEA-HKG-CAN（Alaska + Cathay Pacific）$2,877 + 回 PKX-DOH-ATL（Qatar Airways）$2,754 + 换城市 $150 + 分票风险 $150"
