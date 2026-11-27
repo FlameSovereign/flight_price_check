@@ -1,4 +1,4 @@
-"""Command line entry point: `flightcheck collect | report | run | search`."""
+"""Command line entry point: `flightcheck collect | report | run | dashboard | search`."""
 
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--max-minutes", type=float, help="stop searching after this long and keep what was collected")
         p.add_argument("--resume", action="store_true", help="skip searches already recorded today")
     sub.add_parser("report", help="train the model and write reports/latest.md", parents=[common])
+    p_dash = sub.add_parser("dashboard", help="write the dashboard's data files (JSON) into a folder", parents=[common])
+    p_dash.add_argument("--out", required=True, help="folder for the JSON files")
+    p_dash.add_argument("--past-fares", default="reference/past_fares.csv")
     p_search = sub.add_parser("search", help="one ad-hoc search, printed to the terminal")
     p_search.add_argument("origin", help="e.g. ATL or ATL,IAH")
     p_search.add_argument("destination", help="e.g. PVG,SHA")
@@ -45,6 +48,12 @@ def main(argv: list[str] | None = None) -> None:
 
     watchlist = config.load(args.config)
     data_dir = Path(args.data)
+    if args.cmd == "dashboard":
+        from .dashboard import build as build_dashboard
+
+        counts = build_dashboard(watchlist, data_dir, Path(args.reports), Path(args.past_fares), Path(args.out))
+        print(" ".join(f"{name}={n}" for name, n in counts.items()))
+        return
     if args.cmd in ("collect", "run"):
         from .collect import collect
 

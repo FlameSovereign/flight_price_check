@@ -50,6 +50,7 @@ uv run flightcheck search ATL PVG,SHA 2026-12-10 --airlines TK
 uv run flightcheck collect --limit 20                          # 跑清单里的前 20 个搜索
 uv run flightcheck report                                      # 训练模型 + 生成 reports/latest.md
 uv run flightcheck run                                         # collect + report
+uv run flightcheck dashboard --out dash/                       # 面板用的数据文件（每个数据集一个 JSON）
 uv run pytest
 ```
 
